@@ -5,11 +5,66 @@ import { findLikelyButtons } from './heuristics.js';
 import { saveEvidence } from './evidence.js';
 import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
 import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
+import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
 
 function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
+// --- UNIVERSAL POPUP HANDLER ---
+/**
+ * Call this after any major navigation/click in your Playwright flow.
+ * @param {import('playwright').Page} page
+ */
+async function autoClosePopups(page) {
+  const popupsArr = await page.evaluate(() => {
+    function cssPath(el) {
+      if (!el) return '';
+      let path = '';
+      while (el.parentElement) {
+        let name = el.tagName.toLowerCase();
+        if (el.id) {
+          name += `#${el.id}`;
+          path = name + (path ? '>' + path : '');
+          break;
+        }
+        const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+        if (sibs.length > 1) {
+          name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+        }
+        path = name + (path ? '>' + path : '');
+        el = el.parentElement;
+      }
+      return path;
+    }
+    return Array.from(document.querySelectorAll(
+      '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie'
+    )).filter(el => {
+      const style = window.getComputedStyle(el);
+      return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
+    }).map(el => ({
+      tagName: el.tagName,
+      innerText: el.innerText,
+      id: el.id,
+      class: el.className,
+      selector: cssPath(el)
+    }));
+  });
+
+  if (!popupsArr.length) return;
+
+  const popupSelectors = await suggestPopupCloseWithGemini(popupsArr);
+  for (const popupSel of popupSelectors) {
+    try {
+      await page.waitForSelector(popupSel, { timeout: 1500 });
+      await page.click(popupSel, { delay: 50 });
+    } catch (err) {
+      // Ignore and continue
+    }
+  }
+}
+
+// --- MAIN WORKFLOW ---
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout']) {
   const browser = await chromium.launch({ headless: config.headless, slowMo: config.slowMo });
   const context = await browser.newContext({ userAgent: randomUA() });
@@ -20,10 +75,15 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
 
   try {
     await page.goto(url, { timeout: config.timeout, waitUntil: 'domcontentloaded' });
+    await autoClosePopups(page);
     await saveEvidence({ page, step, evidenceDir, meta: { url, note: 'Initial load' } });
 
     for (const action of actionList) {
       step += 1;
+
+      // POPUP HANDLING (before each main step)
+      await autoClosePopups(page);
+
       // Gather all visible, interactive elements
       const elementsArr = await page.evaluate(() => {
         function cssPath(el) {
@@ -136,22 +196,21 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
                   await page.click(opt.selector);
                 }
               } catch (err) {
-                // Ignore errors, try next instruction
                 continue;
               }
             }
             // 4. Retry add to cart
+            await autoClosePopups(page);
             await page.click(sel, { delay: 50 });
             addToCartSuccess = true;
-            break; // exit selector loop if succeeded
+            break;
           } else {
-            // If not disabled, try click as normal
+            await autoClosePopups(page);
             await page.click(sel, { delay: 50 });
             addToCartSuccess = true;
             break;
           }
         } catch (err) {
-          // Log error, continue to next selector
           log.push({ action, sel, error: err.message });
           continue;
         }
@@ -166,6 +225,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
 
     // At end, capture all scripts, iframes, network logs
     step += 1;
+    await autoClosePopups(page);
     const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
     const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
     await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log } });
