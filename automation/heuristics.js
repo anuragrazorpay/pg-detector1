@@ -11,3 +11,4 @@ export function findLikelyButtons(elements, keywords = ['add to cart', 'buy', 'c
   }
   return candidates;
 }
+
