@@ -4,7 +4,7 @@ dotenv.config();
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from '../config.js';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: config.geminiModel });
 
 /**
  * elementsArr: [{tagName, innerText, ariaLabel, id, class, selector}]
