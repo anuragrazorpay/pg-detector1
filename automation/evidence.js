@@ -8,7 +8,6 @@ export async function saveEvidence({ page, step, evidenceDir, meta }) {
   const domPath = path.join(evidenceDir, `step_${step}_dom.html`);
   const html = await page.content();
   await fs.writeFile(domPath, html);
-  // Save meta (selectors tried, errors, etc.)
   const metaPath = path.join(evidenceDir, `step_${step}_meta.json`);
   await fs.writeJson(metaPath, meta);
 }
