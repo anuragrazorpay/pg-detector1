@@ -8,6 +8,7 @@ import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
 import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
 import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js';
 import { detectAndHandleCaptcha } from './captchaHandler.js';
+import { suggestNextActionWithVisionLLM } from '../llm/visionFallbackGemini.js';
 import axios from 'axios';
 import fs from 'fs';
 
@@ -148,6 +149,95 @@ function detectPaymentGateways({ scripts, iframes }) {
   return found;
 }
 
+// --- Tier 4 Autofill ---
+async function autofillCheckoutFields(page) {
+  // Only fill visible, non-disabled fields if they exist.
+  const autofillData = {
+    'email': 'utube.115111@gmail.com',
+    'name': 'John Doe',
+    'phone': '9090119090',
+    'address': 'Splendid Lakedews, Vittasandra Main Rd, Begur, Bengaluru, Karnataka 560068',
+    'password': 'utube115111@',
+    'country code': '+91'
+  };
+  const fieldSelectors = [
+    { type: 'email', keys: ['email'] },
+    { type: 'text', keys: ['name', 'full name'] },
+    { type: 'tel', keys: ['phone', 'mobile', 'contact'] },
+    { type: 'text', keys: ['address', 'addr', 'street'] },
+    { type: 'password', keys: ['password'] },
+    { type: 'text', keys: ['country code', 'country'] }
+  ];
+  // Find all visible, fillable input fields.
+  const fields = await page.evaluate(() => {
+    function cssPath(el) {
+      if (!el) return '';
+      let path = '';
+      while (el.parentElement) {
+        let name = el.tagName.toLowerCase();
+        if (el.id) {
+          name += `#${el.id}`;
+          path = name + (path ? '>' + path : '');
+          break;
+        }
+        const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+        if (sibs.length > 1) {
+          name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+        }
+        path = name + (path ? '>' + path : '');
+        el = el.parentElement;
+      }
+      return path;
+    }
+    return Array.from(document.querySelectorAll('input, textarea')).filter(el => {
+      const style = window.getComputedStyle(el);
+      return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0 && !el.disabled;
+    }).map(el => ({
+      tagName: el.tagName,
+      type: el.type,
+      name: el.name || '',
+      id: el.id || '',
+      placeholder: el.placeholder || '',
+      selector: cssPath(el)
+    }));
+  });
+  // Try to match and fill each field
+  for (const f of fields) {
+    for (const fs of fieldSelectors) {
+      if (
+        (f.type === fs.type || fs.type === 'text') &&
+        fs.keys.some(k =>
+          (f.name && f.name.toLowerCase().includes(k)) ||
+          (f.id && f.id.toLowerCase().includes(k)) ||
+          (f.placeholder && f.placeholder.toLowerCase().includes(k))
+        )
+      ) {
+        const value = autofillData[fs.keys[0]];
+        if (value) {
+          try { await page.fill(f.selector, value); } catch {}
+          break;
+        }
+      }
+    }
+  }
+}
+
+// --- OTP Detection ---
+async function detectOTP(page) {
+  const otpSelectors = [
+    'input[autocomplete="one-time-code"]',
+    'input[type="tel"][maxlength="6"]',
+    'input[type="text"][maxlength="6"]',
+    'input[placeholder*="OTP"]',
+    'input[placeholder*="otp"]'
+  ];
+  for (const sel of otpSelectors) {
+    const found = await page.$(sel);
+    if (found) return sel;
+  }
+  return null;
+}
+
 // --- Main Exported Function ---
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout'], runContext = {}) {
   let usedProxies = [];
@@ -232,6 +322,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           continue;
         }
 
+        // --- LOGIN LOGIC (Gemini LLM-guided) ---
         const loginArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -303,6 +394,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
         }
 
+        // --- SELECTOR SUGGESTION LOGIC (Gemini/Heuristics, fallback to Vision LLM) ---
         const elementsArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -343,6 +435,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           log.push({ action, selectors, via: 'heuristics' });
         }
 
+        let fallbackVisionTried = false;
+        let actionSuccess = false;
+
         for (const sel of selectors) {
           try {
             await waitForStable(sel, page, 3, 6000);
@@ -354,6 +449,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
               window.getComputedStyle(el).pointerEvents === 'none'
             );
             if (isDisabled) {
+              // --- Option filling logic when button is disabled ---
               const optionsArr = await page.evaluate(() => {
                 function cssPath(el) {
                   if (!el) return '';
@@ -407,12 +503,12 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
               await autoClosePopups(page);
               await waitForStable(sel, page, 3, 6000);
               await page.click(sel, { delay: 50 });
-              addToCartSuccess = true;
+              actionSuccess = true;
               break;
             } else {
               await autoClosePopups(page);
               await page.click(sel, { delay: 50 });
-              addToCartSuccess = true;
+              actionSuccess = true;
               break;
             }
           } catch (err) {
@@ -420,9 +516,28 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
             continue;
           }
         }
-        await saveEvidence({ page, step, evidenceDir, meta: { action, selectors, note: addToCartSuccess ? 'Success' : 'No selectors worked' } });
-        if (!addToCartSuccess) {
-          log.push({ action, error: 'No selectors worked' });
+
+        // --- LLM Vision Fallback ---
+        if (!actionSuccess && !fallbackVisionTried) {
+          const screenshotPath = `${evidenceDir}/step_${step}_vision.png`;
+          await page.screenshot({ path: screenshotPath, fullPage: true });
+          const html = await page.content();
+          const visionAction = await suggestNextActionWithVisionLLM(screenshotPath, html, action);
+          if (visionAction && visionAction.selector) {
+            try {
+              await waitForStable(visionAction.selector, page, 2, 6000);
+              await page.click(visionAction.selector, { delay: 80 });
+              actionSuccess = true;
+              log.push({ action, via: 'vision-llm', selector: visionAction.selector });
+            } catch (err) {
+              log.push({ action, via: 'vision-llm', error: err.message });
+            }
+          }
+        }
+
+        await saveEvidence({ page, step, evidenceDir, meta: { action, selectors, note: actionSuccess ? 'Success' : 'No selectors worked' } });
+        if (!actionSuccess) {
+          log.push({ action, error: 'No selectors worked (even with LLM Vision fallback)' });
           resultPayload = {
             url,
             status: "failure",
@@ -440,11 +555,38 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           await browser.close();
           return { success: false, evidenceDir, log, reason: 'No selectors worked', step };
         }
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1500);
       }
 
+      // --- Tier 4: Autofill checkout fields just before payment step ---
       step += 1;
       await autoClosePopups(page);
+      await autofillCheckoutFields(page);
+
+      // --- OTP Detection (stops, takes screenshot, sends payload, does not proceed further) ---
+      const otpField = await detectOTP(page);
+      if (otpField) {
+        const otpPath = `${evidenceDir}/step_${step}_otp.png`;
+        await page.screenshot({ path: otpPath, fullPage: true });
+        await saveEvidence({ page, step, evidenceDir, meta: { otpDetected: true, otpField, note: 'OTP prompt' } });
+        resultPayload = {
+          url,
+          status: "halted",
+          haltReason: "otp_required",
+          step,
+          proxy,
+          userAgent: ua,
+          evidenceDir,
+          log,
+          runContext,
+          otpScreenshot: otpPath
+        };
+        await sendWebhook(resultPayload);
+        await browser.close();
+        return { success: false, evidenceDir, log, reason: 'OTP detected', step };
+      }
+
+      // --- Final PG detection ---
       const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
       const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
       const paymentGateways = detectPaymentGateways({ scripts, iframes });
