@@ -20,7 +20,7 @@ function randomProxy(usedProxies = []) {
   if (!PROXIES.length) return null;
   const unused = PROXIES.filter(p => !usedProxies.includes(p));
   if (!unused.length) return PROXIES[Math.floor(Math.random() * PROXIES.length)];
-  return unused[Math.floor(Math.random() * unused.length)];
+  return unused[Math.random() * unused.length | 0];
 }
 
 // --- Webhook for n8n: send on both success and failure ---
@@ -133,7 +133,12 @@ function detectPaymentGateways({ scripts, iframes }) {
     { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=/i },
     { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay/i },
     { name: "Atom", regex: /atomtech|atom\.in/i },
-    // Add even more as needed!
+    { name: "Direcpay", regex: /direcpay/i },
+    { name: "EBS", regex: /ebs|ebs\.in|ebssecure/i },
+    { name: "PayGlocal", regex: /payglocal/i },
+    { name: "FSS", regex: /fssnet|fss\.co\.in/i },
+    { name: "Avenues", regex: /avenues|avenues\.in/i },
+    // Add more as needed!
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []);
