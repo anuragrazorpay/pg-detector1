@@ -4,6 +4,6 @@ export const config = {
   headless: false, // set true for stealth mode
   slowMo: 50, // ms between actions
   evidenceDir: './evidence',
-  geminiModel: 'gemini-1.5-pro-latest', // update as needed
+  geminiModel: 'gemini-2.0-flash', // update as needed
   maxElements: 35 // LLM prompt efficiency
 };
