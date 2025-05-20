@@ -6,12 +6,14 @@ import { saveEvidence } from './evidence.js';
 import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
 import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
 import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
-import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js'; // <--- ADD THIS
+import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js';
+import { detectAndHandleCaptcha } from './captchaHandler.js';
 
 function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
+// --- UNIVERSAL POPUP HANDLER ---
 async function autoClosePopups(page) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
@@ -60,6 +62,7 @@ async function autoClosePopups(page) {
   }
 }
 
+// --- MAIN WORKFLOW ---
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout']) {
   const browser = await chromium.launch({ headless: config.headless, slowMo: config.slowMo });
   const context = await browser.newContext({ userAgent: randomUA() });
@@ -71,6 +74,16 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
   try {
     await page.goto(url, { timeout: config.timeout, waitUntil: 'domcontentloaded' });
     await autoClosePopups(page);
+
+    // --- CAPTCHA HANDLER: After first load ---
+    const captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', ''));
+    if (captchaCheck.type) {
+      log.push({ step, captcha: captchaCheck });
+      await saveEvidence({ page, step, evidenceDir, meta: { url, note: 'CAPTCHA Detected', captcha: captchaCheck } });
+      await browser.close();
+      return { success: false, error: 'CAPTCHA or botwall detected', captcha: captchaCheck, log };
+    }
+
     await saveEvidence({ page, step, evidenceDir, meta: { url, note: 'Initial load' } });
 
     for (const action of actionList) {
@@ -78,7 +91,15 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
 
       await autoClosePopups(page);
 
-      // --- LOGIN/GUEST WORKFLOW HANDLER (NEW) ---
+      // --- CAPTCHA HANDLER: Before every action step ---
+      const captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', '') + `_step${step}`);
+      if (captchaCheck.type) {
+        log.push({ step, captcha: captchaCheck });
+        await saveEvidence({ page, step, evidenceDir, meta: { action, note: 'CAPTCHA Detected', captcha: captchaCheck } });
+        break; // Optionally: return or continue as needed
+      }
+
+      // --- LOGIN/GUEST WORKFLOW HANDLER ---
       const loginArr = await page.evaluate(() => {
         function cssPath(el) {
           if (!el) return '';
