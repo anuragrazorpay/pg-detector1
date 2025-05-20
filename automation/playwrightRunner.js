@@ -6,16 +6,12 @@ import { saveEvidence } from './evidence.js';
 import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
 import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
 import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
+import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js'; // <--- ADD THIS
 
 function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-// --- UNIVERSAL POPUP HANDLER ---
-/**
- * Call this after any major navigation/click in your Playwright flow.
- * @param {import('playwright').Page} page
- */
 async function autoClosePopups(page) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
@@ -64,7 +60,6 @@ async function autoClosePopups(page) {
   }
 }
 
-// --- MAIN WORKFLOW ---
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout']) {
   const browser = await chromium.launch({ headless: config.headless, slowMo: config.slowMo });
   const context = await browser.newContext({ userAgent: randomUA() });
@@ -81,8 +76,55 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
     for (const action of actionList) {
       step += 1;
 
-      // POPUP HANDLING (before each main step)
       await autoClosePopups(page);
+
+      // --- LOGIN/GUEST WORKFLOW HANDLER (NEW) ---
+      const loginArr = await page.evaluate(() => {
+        function cssPath(el) {
+          if (!el) return '';
+          let path = '';
+          while (el.parentElement) {
+            let name = el.tagName.toLowerCase();
+            if (el.id) {
+              name += `#${el.id}`;
+              path = name + (path ? '>' + path : '');
+              break;
+            }
+            const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+            if (sibs.length > 1) {
+              name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+            }
+            path = name + (path ? '>' + path : '');
+            el = el.parentElement;
+          }
+          return path;
+        }
+        return Array.from(document.querySelectorAll('input[type="email"], input[type="text"], input[type="password"], button, a')).filter(el => {
+          const t = (el.innerText || el.value || '').toLowerCase();
+          if (t.includes('login') || t.includes('sign in') || t.includes('continue as guest') || t.includes('guest checkout')) return true;
+          return false;
+        }).map(el => ({
+          tagName: el.tagName,
+          type: el.type,
+          innerText: el.innerText,
+          id: el.id,
+          class: el.className,
+          selector: cssPath(el)
+        }));
+      });
+      const loginInstruction = await suggestLoginStrategyWithGemini(loginArr);
+      if (loginInstruction) {
+        if (loginInstruction.type === 'guest') {
+          await page.click(loginInstruction.selector, { delay: 50 });
+          await autoClosePopups(page);
+        } else if (loginInstruction.type === 'login') {
+          await page.fill(loginInstruction.usernameSelector, loginInstruction.creds.username);
+          await page.fill(loginInstruction.passwordSelector, loginInstruction.creds.password);
+          await page.click(loginInstruction.loginBtnSelector, { delay: 50 });
+          await autoClosePopups(page);
+        }
+      }
+      // --- END LOGIN/GUEST HANDLER ---
 
       // Gather all visible, interactive elements
       const elementsArr = await page.evaluate(() => {
@@ -118,11 +160,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         }));
       });
 
-      // LLM try
       let selectors = await suggestSelectorsWithGemini(elementsArr, action);
       log.push({ action, selectors, via: 'gemini' });
 
-      // Heuristic fallback
       if (!selectors || !selectors.length) {
         selectors = findLikelyButtons(elementsArr);
         log.push({ action, selectors, via: 'heuristics' });
@@ -132,17 +172,13 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       for (const sel of selectors) {
         try {
           await page.waitForSelector(sel, { timeout: 4000 });
-
-          // Check if the button is disabled
           const isDisabled = await page.$eval(sel, el =>
             el.disabled ||
             el.getAttribute('aria-disabled') === 'true' ||
             el.classList.contains('disabled') ||
             window.getComputedStyle(el).pointerEvents === 'none'
           );
-
           if (isDisabled) {
-            // 1. Extract option/select/swatch/text elements
             const optionsArr = await page.evaluate(() => {
               function cssPath(el) {
                 if (!el) return '';
@@ -178,11 +214,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
                 selector: cssPath(el)
               }));
             });
-
-            // 2. Ask Gemini for what to fill/click
             const fillInstructions = await suggestOptionFillWithGemini(optionsArr);
-
-            // 3. Fill/click each suggestion
             for (const opt of fillInstructions) {
               try {
                 await page.waitForSelector(opt.selector, { timeout: 2000 });
@@ -199,7 +231,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
                 continue;
               }
             }
-            // 4. Retry add to cart
             await autoClosePopups(page);
             await page.click(sel, { delay: 50 });
             addToCartSuccess = true;
@@ -219,11 +250,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       if (!addToCartSuccess) {
         log.push({ action, error: 'No selectors worked' });
       }
-      // Wait for cart/modal/checkout UI to appear, or page change
       await page.waitForTimeout(2000);
     }
 
-    // At end, capture all scripts, iframes, network logs
     step += 1;
     await autoClosePopups(page);
     const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
