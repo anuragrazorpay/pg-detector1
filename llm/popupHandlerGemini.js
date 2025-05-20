@@ -4,7 +4,7 @@ dotenv.config();
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from '../config.js';
 
-const model = genAI.getGenerativeModel({ model: config.geminiModel });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 /**
  * @param {Array} popupsArr - Array of visible modal/overlay elements with selector, text, etc.
