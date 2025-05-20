@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { USER_AGENTS } from '../userAgents.js';
 import { findLikelyButtons } from './heuristics.js';
 import { saveEvidence } from './evidence.js';
-import { suggestSelectorsWithLLM } from '../llm/domSelectorGPT.js';
+import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
 
 function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
@@ -25,7 +25,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       step += 1;
       // Gather all visible, interactive elements
       const elementsArr = await page.evaluate(() => {
-        // Returns array of {tagName, innerText, ariaLabel, id, class, selector}
         function cssPath(el) {
           if (!el) return '';
           let path = '';
@@ -59,8 +58,8 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       });
 
       // LLM try
-      let selectors = await suggestSelectorsWithLLM(elementsArr, action);
-      log.push({ action, selectors, via: 'llm' });
+      let selectors = await suggestSelectorsWithGemini(elementsArr, action);
+      log.push({ action, selectors, via: 'gemini' });
 
       // Heuristic fallback
       if (!selectors || !selectors.length) {
@@ -84,12 +83,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       if (!success) {
         log.push({ action, error: 'No selectors worked' });
       }
-
-      // Wait for cart/modal/checkout UI to appear, or page change
       await page.waitForTimeout(2000);
     }
 
-    // At end, capture all scripts, iframes, network logs
     step += 1;
     const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
     const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
