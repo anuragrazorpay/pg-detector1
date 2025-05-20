@@ -1,0 +1,16 @@
+{
+  "name": "pg-detector1",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Universal payment gateway detector using Playwright + LLM",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0",
+    "openai": "^4.0.0",
+    "fs-extra": "^11.1.1",
+    "dotenv": "^16.4.5"
+  }
+}
