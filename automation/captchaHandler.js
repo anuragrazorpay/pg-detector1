@@ -21,7 +21,6 @@ export async function detectAndHandleCaptcha(page, runId = '') {
 
   if (!captcha) return { type: null, solved: false };
 
-  // Screenshot for audit
   try {
     await page.screenshot({ path: `./evidence/${runId}_captcha.png` });
   } catch (err) {}
