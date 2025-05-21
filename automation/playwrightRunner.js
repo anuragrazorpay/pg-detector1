@@ -8,11 +8,12 @@ import { suggestOptionFillWithGemini } from './llm/optionFillingGemini.js';
 import { suggestPopupCloseWithGemini } from './llm/popupHandlerGemini.js';
 import { suggestLoginStrategyWithGemini } from './llm/loginHandlerGemini.js';
 import { detectAndHandleCaptcha } from './automation/captchaHandler.js';
-import { suggestNextActionWithVisionLLM } from './llm/visionFallbackGemini.js';
+import { suggestNextActionWithVisionLLM } from './llm/visionNavigator.js'; // <- Make sure this is the correct helper filename!
 import axios from 'axios';
 import fs from 'fs';
 import cheerio from 'cheerio';
 
+// --- Proxy Handling ---
 const PROXIES = process.env.PROXIES
   ? process.env.PROXIES.split(',').map(x => x.trim()).filter(Boolean)
   : [];
@@ -23,6 +24,7 @@ function randomProxy(usedProxies = []) {
   return unused[Math.random() * unused.length | 0];
 }
 
+// --- Webhook ---
 const WEBHOOK_URL = process.env.HITL_WEBHOOK_URL || 'https://your-n8n-instance/webhook/pg-detector-result';
 async function sendWebhook(payload) {
   try {
@@ -38,8 +40,10 @@ async function sendWebhook(payload) {
   }
 }
 
+// --- Evidence Dir ---
 if (!fs.existsSync(config.evidenceDir)) fs.mkdirSync(config.evidenceDir, { recursive: true });
 
+// --- Wait Helper ---
 async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -51,6 +55,7 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
+// --- Exhaustive Popup/Drawer/Modal Handler ---
 async function handleAllPopups(page, log, step) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
@@ -98,6 +103,7 @@ async function handleAllPopups(page, log, step) {
   }
 }
 
+// --- PG Detection (scripts, iframes, network, visible text) ---
 function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
     { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
@@ -135,6 +141,7 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
     { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
     { name: "Avenues", regex: /avenues|avenues\.in/i },
+    // Extend as needed
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
@@ -145,6 +152,7 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
   return Array.from(new Set(found));
 }
 
+// --- OTP ---
 async function detectOTP(page) {
   const otpSelectors = [
     'input[autocomplete="one-time-code"]',
@@ -160,6 +168,7 @@ async function detectOTP(page) {
   return null;
 }
 
+// --- Address Autofill Handler (Optional) ---
 async function fillAddressIfVisible(page, log, step) {
   const addressFields = await page.evaluate(() => {
     function cssPath(el) {
@@ -229,6 +238,7 @@ async function fillAddressIfVisible(page, log, step) {
   }
 }
 
+// --- Main Exported Simulation Function ---
 export async function runCartSimulation(
   url,
   actionList = [
@@ -329,6 +339,7 @@ export async function runCartSimulation(
           continue;
         }
 
+        // --- Extract Interactive Elements ---
         let elementsArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -362,6 +373,7 @@ export async function runCartSimulation(
           }));
         });
 
+        // --- Extract Elements from Modals/Drawers ---
         let modalElementsArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -399,6 +411,7 @@ export async function runCartSimulation(
         });
         elementsArr = elementsArr.concat(modalElementsArr);
 
+        // --- LLM Selector Suggestion ---
         let selectors = [];
         let llmRes = await suggestSelectorsWithGemini(elementsArr, action);
         if (Array.isArray(llmRes) && llmRes.length) {
@@ -419,6 +432,19 @@ export async function runCartSimulation(
           if (selectors.length) log.push({ action, selectors, via: 'checkout-text-fallback' });
         }
 
+        // --- Fallback to Vision LLM if Needed ---
+        if (!selectors.length && typeof suggestNextActionWithVisionLLM === 'function') {
+          const screenshotPath = `${evidenceDir}/step_${step}_vision.png`;
+          await page.screenshot({ path: screenshotPath, fullPage: true });
+          const html = await page.content();
+          const visionResp = await suggestNextActionWithVisionLLM(screenshotPath, html, action);
+          if (visionResp && visionResp.selector) {
+            selectors = [visionResp.selector];
+            log.push({ action, selectors, via: 'vision-fallback', visionResp });
+          }
+        }
+
+        // --- Try to Click Selectors ---
         let actionSuccess = false;
         for (const sel of selectors) {
           try {
@@ -488,6 +514,7 @@ export async function runCartSimulation(
         return { success: false, evidenceDir, log, reason: 'OTP detected', step };
       }
 
+      // --- Evidence, Gateway Detection ---
       const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
       const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
       const html = await page.content();
@@ -559,4 +586,16 @@ export async function runCartSimulation(
   };
   await sendWebhook(resultPayload);
   return { success: false, log, reason: 'All proxies/cycles failed' };
+}
+
+// --- CLI usage ---
+if (require.main === module) {
+  const url = process.argv[2];
+  if (!url) {
+    console.error("Usage: node index.js <url>");
+    process.exit(1);
+  }
+  runCartSimulation(url).then(result => {
+    console.log(JSON.stringify(result, null, 2));
+  });
 }
