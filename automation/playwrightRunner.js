@@ -139,6 +139,7 @@ function detectPaymentGateways({ scripts, iframes }) {
     { name: "EBS", regex: /ebs|ebs\.in|ebssecure/i },
     { name: "PayGlocal", regex: /payglocal/i },
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
+    { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
     { name: "Avenues", regex: /avenues|avenues\.in/i },
     // Add more as needed!
   ];
