@@ -1,20 +1,20 @@
 import { chromium } from 'playwright';
-import { config } from '../config.js';
-import { USER_AGENTS } from '../userAgents.js';
-import { findLikelyButtons } from './heuristics.js';
-import { saveEvidence } from './evidence.js';
-import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
-import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
-import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
-import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js';
-import { detectAndHandleCaptcha } from './captchaHandler.js';
-import { suggestNextActionWithVisionLLM } from '../llm/visionFallbackGemini.js';
-import { fillCheckoutIfVisible } from './checkoutFormFiller.js';
+import { config } from './config.js';
+import { USER_AGENTS } from './userAgents.js';
+import { findLikelyButtons } from './automation/heuristics.js';
+import { saveEvidence } from './automation/evidence.js';
+import { suggestSelectorsWithGemini } from './llm/domSelectorGemini.js';
+import { suggestOptionFillWithGemini } from './llm/optionFillingGemini.js';
+import { suggestPopupCloseWithGemini } from './llm/popupHandlerGemini.js';
+import { suggestLoginStrategyWithGemini } from './llm/loginHandlerGemini.js';
+import { detectAndHandleCaptcha } from './automation/captchaHandler.js';
+import { suggestNextActionWithVisionLLM } from './llm/visionFallbackGemini.js';
+import { fillCheckoutIfVisible } from './automation/checkoutFormFiller.js';
 import axios from 'axios';
 import fs from 'fs';
-// import Tesseract from 'tesseract.js'; // Uncomment if using OCR fallback
+import cheerio from 'cheerio';
 
-// === Proxy Rotation ===
+// --- Proxy Handling ---
 const PROXIES = process.env.PROXIES
   ? process.env.PROXIES.split(',').map(x => x.trim()).filter(Boolean)
   : [];
@@ -25,7 +25,7 @@ function randomProxy(usedProxies = []) {
   return unused[Math.random() * unused.length | 0];
 }
 
-// === Webhook Reporting ===
+// --- Webhook ---
 const WEBHOOK_URL = process.env.HITL_WEBHOOK_URL || 'https://your-n8n-instance/webhook/pg-detector-result';
 async function sendWebhook(payload) {
   try {
@@ -41,10 +41,10 @@ async function sendWebhook(payload) {
   }
 }
 
-// === Ensure Evidence Directory ===
+// --- Evidence Dir ---
 if (!fs.existsSync(config.evidenceDir)) fs.mkdirSync(config.evidenceDir, { recursive: true });
 
-// === Wait for Selector with Retry ===
+// --- Wait Helper ---
 async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -56,9 +56,8 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
-// === Exhaustive Modal/Overlay/Popup Handler (Recursive) ===
-async function autoClosePopups(page, depth = 0, maxDepth = 3) {
-  if (depth > maxDepth) return;
+// --- Exhaustive Popup/Drawer/Modal Handler ---
+async function autoClosePopups(page) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
       if (!el) return '';
@@ -79,8 +78,9 @@ async function autoClosePopups(page, depth = 0, maxDepth = 3) {
       }
       return path;
     }
+    // Covers: dialog, modal, popup, overlay, sheet, drawer, side-panel, bottom-sheet, mini-cart
     return Array.from(document.querySelectorAll(
-      '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie, .drawer, .sheet, .flyout, .bottom-sheet, .side-modal, .cart-modal, .mini-cart'
+      '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie, .drawer, .sheet, .flyout, .side-panel, .cart-modal, .mini-cart, .cart-drawer'
     )).filter(el => {
       const style = window.getComputedStyle(el);
       return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
@@ -98,13 +98,11 @@ async function autoClosePopups(page, depth = 0, maxDepth = 3) {
     try {
       await waitForStable(popupSel, page, 2, 2000);
       await page.click(popupSel, { delay: 50 });
-      // Recursively check if more overlays appear after closing
-      await autoClosePopups(page, depth + 1, maxDepth);
     } catch (err) {}
   }
 }
 
-// === Payment Gateway Detection (now uses scripts, iframes, html, and network requests) ===
+// --- PG Detection (scripts, iframes, network, visible text) ---
 function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
     { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
@@ -142,7 +140,7 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
     { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
     { name: "Avenues", regex: /avenues|avenues\.in/i },
-    // Add more as needed!
+    // Extend as needed
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
@@ -153,7 +151,7 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
   return Array.from(new Set(found));
 }
 
-// === OTP Detection ===
+// --- OTP ---
 async function detectOTP(page) {
   const otpSelectors = [
     'input[autocomplete="one-time-code"]',
@@ -169,68 +167,7 @@ async function detectOTP(page) {
   return null;
 }
 
-// === Checkout/Buy-Now Selector List ===
-const CHECKOUT_TEXTS = [
-  "checkout", "buy now", "place order", "pay", "go to checkout", "continue to checkout",
-  "proceed", "proceed to pay", "order now", "pay now", "continue to payment", "payment", "review order"
-];
-
-// === Helper: Get all visible buttons/anchors with checkout text (deep in overlays/minicarts) ===
-async function findCheckoutButtonsAnywhere(page) {
-  // Traverse all visible overlays, modals, mini-carts, drawers, etc.
-  const selectors = await page.evaluate((CHECKOUT_TEXTS) => {
-    function cssPath(el) {
-      if (!el) return '';
-      let path = '';
-      while (el.parentElement) {
-        let name = el.tagName.toLowerCase();
-        if (el.id) {
-          name += `#${el.id}`;
-          path = name + (path ? '>' + path : '');
-          break;
-        }
-        const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
-        if (sibs.length > 1) {
-          name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
-        }
-        path = name + (path ? '>' + path : '');
-        el = el.parentElement;
-      }
-      return path;
-    }
-    // Search all visible elements, not just in document.body
-    return Array.from(document.querySelectorAll('button, a, input[type=submit]')).filter(el => {
-      const style = window.getComputedStyle(el);
-      return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
-    }).filter(el =>
-      CHECKOUT_TEXTS.some(txt => (el.innerText || '').toLowerCase().includes(txt))
-    ).map(el => cssPath(el));
-  }, CHECKOUT_TEXTS);
-  return selectors;
-}
-
-// === Network Request Interceptor ===
-function enableNetworkSniffing(page, requestsArr) {
-  page.on('request', req => {
-    if (req.resourceType() === 'script' || req.resourceType() === 'xhr' || req.resourceType() === 'fetch') {
-      requestsArr.push(req.url());
-    }
-  });
-}
-
-// === OCR Fallback (stub; needs tesseract.js & Node canvas for real use) ===
-async function ocrDetectCheckoutButton(screenshotPath) {
-  // Uncomment and configure Tesseract if you want real OCR:
-  // const result = await Tesseract.recognize(screenshotPath, 'eng');
-  // const text = result.data.text;
-  // for (const phrase of CHECKOUT_TEXTS) {
-  //   if (text.toLowerCase().includes(phrase)) return true;
-  // }
-  // return false;
-  return false;
-}
-
-// === Main Exported Function ===
+// --- Main Cart Simulation Export ---
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout'], runContext = {}) {
   let usedProxies = [];
   let proxyRetryCount = 0;
@@ -253,14 +190,16 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       context = await browser.newContext({ userAgent: ua });
       page = await context.newPage();
 
-      // === Network Sniffing ===
-      const networkRequests = [];
-      enableNetworkSniffing(page, networkRequests);
+      // --- Network Request Interception ---
+      let networkLogs = [];
+      page.on('request', req => {
+        networkLogs.push(req.url());
+      });
 
       await page.goto(url, { timeout: config.timeout, waitUntil: 'domcontentloaded' });
       await autoClosePopups(page);
 
-      // === CAPTCHA HANDLING ===
+      // --- CAPTCHA HANDLING ---
       let captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', ''));
       if (captchaCheck.type) {
         log.push({ step, captcha: captchaCheck });
@@ -288,7 +227,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
 
       await saveEvidence({ page, step, evidenceDir, meta: { url, note: 'Initial load' } });
 
-      // === Action Simulation (Add to Cart, then Checkout) ===
       for (const action of actionList) {
         step += 1;
         await autoClosePopups(page);
@@ -318,7 +256,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           continue;
         }
 
-        // === LOGIN/REGISTER/GUEST CHECKOUT LOGIC ===
+        // --- LOGIN/REGISTER/GUEST CHECKOUT LOGIC ---
         const loginArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -393,8 +331,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
         }
 
-        // === ELEMENTS: EXHAUSTIVE BUTTON/CTA SEARCH ===
-        const elementsArr = await page.evaluate((CHECKOUT_TEXTS) => {
+        // --- ELEMENTS: EXHAUSTIVE BUTTON/CTA SEARCH ---
+        // After add to cart, check for modals/drawers for checkout button
+        let elementsArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
             let path = '';
@@ -424,108 +363,86 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
             id: el.id,
             class: el.className,
             selector: cssPath(el),
-            containsCheckoutText: CHECKOUT_TEXTS.some(txt => (el.innerText || '').toLowerCase().includes(txt))
           }));
-        }, CHECKOUT_TEXTS);
+        });
 
-        // === 1st: LLM Suggestion ===
-        let selectors = await suggestSelectorsWithGemini(elementsArr, action);
-        log.push({ action, selectors, via: 'gemini' });
-
-        // === 2nd: Heuristics ===
-        if (!selectors || !selectors.length) {
-          selectors = findLikelyButtons(elementsArr);
-          log.push({ action, selectors, via: 'heuristics' });
+        // Also: after "add to cart", check if a modal or drawer appeared and scan for checkout inside it
+        let modalElementsArr = [];
+        if (action.toLowerCase().includes('checkout')) {
+          modalElementsArr = await page.evaluate(() => {
+            function cssPath(el) {
+              if (!el) return '';
+              let path = '';
+              while (el.parentElement) {
+                let name = el.tagName.toLowerCase();
+                if (el.id) {
+                  name += `#${el.id}`;
+                  path = name + (path ? '>' + path : '');
+                  break;
+                }
+                const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+                if (sibs.length > 1) {
+                  name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+                }
+                path = name + (path ? '>' + path : '');
+                el = el.parentElement;
+              }
+              return path;
+            }
+            const modalSel = '.modal, .drawer, .cart-modal, .mini-cart, .side-panel, [role="dialog"]';
+            return Array.from(document.querySelectorAll(`${modalSel} button, ${modalSel} a, ${modalSel} input[type=submit]`))
+              .filter(el => {
+                const style = window.getComputedStyle(el);
+                return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
+              })
+              .map(el => ({
+                tagName: el.tagName,
+                innerText: el.innerText,
+                ariaLabel: el.getAttribute('aria-label'),
+                id: el.id,
+                class: el.className,
+                selector: cssPath(el),
+              }));
+          });
         }
+        elementsArr = elementsArr.concat(modalElementsArr);
 
-        // === 3rd: Fallback: Click All CTAs with Checkout Text (across overlays) ===
+        // --- Exhaustive LLM + Heuristic + Fallback ---
+        let selectors = [];
+        // 1. LLM
+        let llmRes = await suggestSelectorsWithGemini(elementsArr, action);
+        if (Array.isArray(llmRes) && llmRes.length && llmRes.every(sel => typeof sel === 'string' && sel.startsWith('.'))) {
+          selectors = llmRes;
+          log.push({ action, selectors, via: 'gemini' });
+        } else {
+          // 2. Heuristics
+          selectors = findLikelyButtons(elementsArr, action);
+          if (selectors.length) log.push({ action, selectors, via: 'heuristics' });
+        }
+        // 3. Fallback: all buttons with checkout/pay/buy text
         if (!selectors.length) {
-          selectors = await findCheckoutButtonsAnywhere(page);
-          log.push({ action, selectors, via: 'checkout-text-fallback' });
+          const texts = ["checkout", "buy now", "place order", "pay", "go to checkout", "continue to checkout", "proceed", "proceed to pay", "order now", "pay now", "continue to payment", "payment", "review order"];
+          selectors = elementsArr.filter(el =>
+            texts.some(txt => (el.innerText || '').toLowerCase().includes(txt))
+          ).map(el => el.selector);
+          if (selectors.length) log.push({ action, selectors, via: 'checkout-text-fallback' });
         }
 
-        // === 4th: Vision LLM Fallback ===
+        // --- Vision LLM fallback (screenshot/HTML) ---
         let fallbackVisionTried = false;
         let actionSuccess = false;
         for (const sel of selectors) {
           try {
             await waitForStable(sel, page, 3, 6000);
-            const isDisabled = await page.$eval(sel, el =>
-              el.disabled ||
-              el.getAttribute('aria-disabled') === 'true' ||
-              el.classList.contains('disabled') ||
-              window.getComputedStyle(el).pointerEvents === 'none'
-            );
-            if (isDisabled) {
-              // Option filling
-              const optionsArr = await page.evaluate(() => {
-                function cssPath(el) {
-                  if (!el) return '';
-                  let path = '';
-                  while (el.parentElement) {
-                    let name = el.tagName.toLowerCase();
-                    if (el.id) {
-                      name += `#${el.id}`;
-                      path = name + (path ? '>' + path : '');
-                      break;
-                    }
-                    const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
-                    if (sibs.length > 1) {
-                      name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
-                    }
-                    path = name + (path ? '>' + path : '');
-                    el = el.parentElement;
-                  }
-                  return path;
-                }
-                return Array.from(document.querySelectorAll(
-                  'select, input:not([type="hidden"]), [role="option"], .swatch, .variant, .option, .product-option'
-                )).filter(el => {
-                  const style = window.getComputedStyle(el);
-                  return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
-                }).map(el => ({
-                  tagName: el.tagName,
-                  type: el.type,
-                  innerText: el.innerText,
-                  ariaLabel: el.getAttribute('aria-label'),
-                  id: el.id,
-                  class: el.className,
-                  selector: cssPath(el)
-                }));
-              });
-              const fillInstructions = await suggestOptionFillWithGemini(optionsArr);
-              for (const opt of fillInstructions) {
-                try {
-                  await waitForStable(opt.selector, page, 2, 3000);
-                  if (opt.type === 'select-one' || opt.tagName === 'SELECT') {
-                    await page.selectOption(opt.selector, { label: opt.value });
-                  } else if (opt.type === 'radio' || opt.type === 'checkbox') {
-                    await page.check(opt.selector);
-                  } else if (opt.type === 'text' || opt.tagName === 'INPUT') {
-                    await page.fill(opt.selector, opt.value || 'test');
-                  } else {
-                    await page.click(opt.selector);
-                  }
-                } catch (err) { continue; }
-              }
-              await autoClosePopups(page);
-              await waitForStable(sel, page, 3, 6000);
-              await page.click(sel, { delay: 50 });
-              actionSuccess = true;
-              break;
-            } else {
-              await autoClosePopups(page);
-              await page.click(sel, { delay: 50 });
-              actionSuccess = true;
-              break;
-            }
+            await autoClosePopups(page);
+            await page.click(sel, { delay: 50 });
+            actionSuccess = true;
+            break;
           } catch (err) {
             log.push({ action, sel, error: err.message });
             continue;
           }
         }
-
-        // Vision LLM fallback if all above fail
         if (!actionSuccess && !fallbackVisionTried) {
           const screenshotPath = `${evidenceDir}/step_${step}_vision.png`;
           await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -543,20 +460,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
         }
 
-        // OCR fallback (stub; see top for Tesseract config)
-        if (!actionSuccess) {
-          const screenshotPath = `${evidenceDir}/step_${step}_ocr.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          const found = await ocrDetectCheckoutButton(screenshotPath);
-          if (found) {
-            log.push({ action, via: 'ocr-fallback', screenshotPath });
-            actionSuccess = true;
-          }
-        }
-
         await saveEvidence({ page, step, evidenceDir, meta: { action, selectors, note: actionSuccess ? 'Success' : 'No selectors worked' } });
         if (!actionSuccess) {
-          log.push({ action, error: 'No selectors worked (even with LLM Vision/OCR fallback)' });
+          log.push({ action, error: 'No selectors worked (even with LLM Vision fallback)' });
           resultPayload = {
             url,
             status: "failure",
@@ -577,12 +483,12 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         await page.waitForTimeout(1500);
       }
 
-      // === Autofill on Checkout Screen ===
+      // --- Autofill on Checkout Screen ---
       step += 1;
       await autoClosePopups(page);
       await fillCheckoutIfVisible(page, config.testData);
 
-      // === OTP Detection ===
+      // --- OTP Detection ---
       const otpField = await detectOTP(page);
       if (otpField) {
         const otpPath = `${evidenceDir}/step_${step}_otp.png`;
@@ -605,25 +511,29 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         return { success: false, evidenceDir, log, reason: 'OTP detected', step };
       }
 
-      // === PG detection, Network Requests, etc. ===
+      // --- Final PG detection (add scripts, iframes, network, visible text) ---
       const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
       const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
       const html = await page.content();
-      // Optionally: capture all visible text
-      const visibleText = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('body *'))
-          .filter(el => el.childElementCount === 0 && el.textContent.trim())
-          .map(el => el.textContent.trim()).filter(Boolean)
-      );
+      // Cheerio for visible text if you want to scan for "powered by" clues
+      const $ = cheerio.load(html);
+      let visibleTextArr = [];
+      $('body *').each((i, el) => {
+        const text = $(el).text().trim();
+        if (text && text.length > 8 && /payment|powered by|pay now|secure/i.test(text)) {
+          visibleTextArr.push(text);
+        }
+      });
+
       const paymentGateways = detectPaymentGateways({
         scripts,
         iframes,
         html,
-        networkRequests,
-        visibleText
+        networkRequests: networkLogs,
+        visibleText: visibleTextArr
       });
 
-      await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, networkRequests, log, paymentGateways } });
+      await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log, paymentGateways } });
 
       resultPayload = {
         url,
@@ -635,13 +545,13 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         log,
         scripts,
         iframes,
-        networkRequests,
+        networkLogs,
         paymentGateways,
         runContext
       };
       await sendWebhook(resultPayload);
       await browser.close();
-      return { success: true, evidenceDir, scripts, iframes, networkRequests, log, paymentGateways };
+      return { success: true, evidenceDir, scripts, iframes, networkLogs, log, paymentGateways };
     } catch (err) {
       log.push({ error: err.message, step, proxy });
       if (browser) await browser.close();
