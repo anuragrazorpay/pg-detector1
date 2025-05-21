@@ -55,6 +55,49 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
+// --- New: Aggressive Overlay/Modal/Backdrop Handler ---
+async function closeCheckoutOverlays(page) {
+  const selectors = [
+    '#quickCheckoutBackdrop',
+    '.quickCheckoutBackdrop',
+    '.modal-backdrop',
+    '[role="dialog"] .close',
+    '.close-modal',
+    '.close',
+    '[aria-label="close"]',
+    '.popup-close',
+    '.modal .close',
+    '.newsletter-close',
+    '.cart-drawer [aria-label="close"]',
+    '.mini-cart [aria-label="close"]',
+    '[class*=backdrop]',
+    '[id*=backdrop]',
+    '[class*=overlay]',
+    '[id*=overlay]',
+    '[class*=popup]',
+    '[id*=popup]',
+    '[data-dismiss]',
+  ];
+
+  for (const sel of selectors) {
+    const el = await page.$(sel);
+    if (el) {
+      try {
+        await el.click();
+        await page.waitForTimeout(500);
+        console.log(`Closed overlay via ${sel}`);
+      } catch (err) {
+        // If not clickable, force remove
+        await page.evaluate(selector => {
+          const e = document.querySelector(selector);
+          if (e) e.remove();
+        }, sel);
+        console.log(`Force-removed overlay via ${sel}`);
+      }
+    }
+  }
+}
+
 // --- Exhaustive Popup/Drawer/Modal Handler ---
 async function handleAllPopups(page, log, step) {
   const popupsArr = await page.evaluate(() => {
@@ -240,42 +283,42 @@ async function fillAddressIfVisible(page, log, step) {
 // --- LIVE PG DETECTION FUNCTION ---
 async function detectLivePaymentGateway(page) {
   const patterns = [
-  { name: "Razorpay", regex: /razorpay|checkout\.razorpay|api\.razorpay|dashboard\.razorpay/i },
-  { name: "PayU", regex: /payu|payu\.in|secure\.payu|payu\.money|api\.payu|paymentgateway\.payu/i },
-  { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe|api\.stripe|pay\.stripe|dashboard\.stripe/i },
-  { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue|payment\.ccavenue|checkout\.ccavenue|api\.ccavenue/i },
-  { name: "Cashfree", regex: /cashfree|checkout\.cashfree|api\.cashfree|payments\.cashfree|cfstatic\.cashfree/i },
-  { name: "Billdesk", regex: /billdesk|pguat\.billdesk|eazy\.billdesk|payment\.billdesk|pay\.billdesk/i },
-  { name: "Paytm", regex: /paytm|securegw\.paytm|merchant\.paytm|paytm\.payments|paytm\.bank|api\.paytm/i },
-  { name: "PhonePe", regex: /phonepe|pg\.phonepe|payments\.phonepe|api\.phonepe|phonepeassets|phonepecdn/i },
-  { name: "Amazon Pay", regex: /amazonpay|pay\.amazon\.in|amazon\.co\.in\/payment|payments\.amazon|amazonpay\.in|amazonpay\.com/i },
-  { name: "Mobikwik", regex: /mobikwik|wallet\.mobikwik|api\.mobikwik|payments\.mobikwik|paywithmobikwik/i },
-  { name: "Pine Labs", regex: /pinelabs|plutus|plutus-cloud|pine\.pay|pinepg|plutuscloud|api\.pinelabs/i },
-  { name: "Airtel Payments Bank", regex: /airtelpay|airtelbank|airtel\.in\/bank|paymentsbank\.airtel|api\.airtelbank/i },
-  { name: "Google Pay (GPay)", regex: /googlepay|gpay|pay\.google\.com|pay\.g\.co|payments\.google|tez\.google/i },
-  { name: "Juspay", regex: /juspay|juspay\.io|expresscheckout|api\.juspay|checkout\.juspay/i },
-  { name: "Worldline (Ingenico)", regex: /worldline|ingenico|paymentservices\.ingenico|wlpayments|onlinepayment\.worldline/i },
-  { name: "HDFC Payment Gateway", regex: /hdfcbank|paymentgateway\.hdfcbank|hdfcpayment|api\.hdfcbank|hdfc\.co\.in/i },
-  { name: "ICICI Payment Gateway", regex: /icicibank|icicipayments|paymentgateway\.icicibank|icicibank\.com|api\.icicibank/i },
-  { name: "Axis Bank Payment Gateway", regex: /axisbank|paymentgateway\.axisbank|axisbank\.co\.in|api\.axisbank/i },
-  { name: "PayPal", regex: /paypal|www\.paypalobjects\.com|paypal\.com|paypal\.in|api\.paypal/i },
-  { name: "BharatQR", regex: /bharatqr|npci\.org\.in|qr\.bharat|bharatqr\.upi/i },
-  { name: "Flexmoney", regex: /flexmoney|instantemi|checkout\.flexmoney|api\.flexmoney/i },
-  { name: "OneCard", regex: /getonecard|onecard|one\.card|api\.onecard|pay\.onecard/i },
-  { name: "Square", regex: /squareup|square\.com|squarecdn|api\.square|checkout\.square/i },
-  { name: "ZestMoney", regex: /zestmoney|api\.zestmoney|checkout\.zestmoney|paywithzestmoney/i },
-  { name: "Instamojo", regex: /instamojo|checkout\.instamojo|api\.instamojo|pay\.instamojo/i },
-  { name: "Paykun", regex: /paykun|checkout\.paykun|api\.paykun/i },
-  { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=|upi\.me|upi\.org\.in/i },
-  { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay|paymentgateway\.sbi|api\.sbi/i },
-  { name: "Atom", regex: /atomtech|atom\.in|paymentgateway\.atom|api\.atomtech/i },
-  { name: "Direcpay", regex: /direcpay|api\.direcpay|checkout\.direcpay/i },
-  { name: "EBS", regex: /ebs|ebs\.in|ebssecure|paymentgateway\.ebs|api\.ebs/i },
-  { name: "PayGlocal", regex: /payglocal|api\.payglocal|checkout\.payglocal/i },
-  { name: "FSS", regex: /fssnet|fss\.co\.in|fsspayments|api\.fss/i },
-  { name: "Gokwik", regex: /gokwik|gwk\.to|gwk\.in|gokwik\.co|gokwik\.com|analytics\.gokwik|pay\.gokwik|gokwik\.in|gwkcdn|gokwikcdn/i },
-  { name: "Avenues", regex: /avenues|avenues\.in|paymentgateway\.avenues|api\.avenues/i }
-];
+    { name: "Razorpay", regex: /razorpay|checkout\.razorpay|api\.razorpay|dashboard\.razorpay/i },
+    { name: "PayU", regex: /payu|payu\.in|secure\.payu|payu\.money|api\.payu|paymentgateway\.payu/i },
+    { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe|api\.stripe|pay\.stripe|dashboard\.stripe/i },
+    { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue|payment\.ccavenue|checkout\.ccavenue|api\.ccavenue/i },
+    { name: "Cashfree", regex: /cashfree|checkout\.cashfree|api\.cashfree|payments\.cashfree|cfstatic\.cashfree/i },
+    { name: "Billdesk", regex: /billdesk|pguat\.billdesk|eazy\.billdesk|payment\.billdesk|pay\.billdesk/i },
+    { name: "Paytm", regex: /paytm|securegw\.paytm|merchant\.paytm|paytm\.payments|paytm\.bank|api\.paytm/i },
+    { name: "PhonePe", regex: /phonepe|pg\.phonepe|payments\.phonepe|api\.phonepe|phonepeassets|phonepecdn/i },
+    { name: "Amazon Pay", regex: /amazonpay|pay\.amazon\.in|amazon\.co\.in\/payment|payments\.amazon|amazonpay\.in|amazonpay\.com/i },
+    { name: "Mobikwik", regex: /mobikwik|wallet\.mobikwik|api\.mobikwik|payments\.mobikwik|paywithmobikwik/i },
+    { name: "Pine Labs", regex: /pinelabs|plutus|plutus-cloud|pine\.pay|pinepg|plutuscloud|api\.pinelabs/i },
+    { name: "Airtel Payments Bank", regex: /airtelpay|airtelbank|airtel\.in\/bank|paymentsbank\.airtel|api\.airtelbank/i },
+    { name: "Google Pay (GPay)", regex: /googlepay|gpay|pay\.google\.com|pay\.g\.co|payments\.google|tez\.google/i },
+    { name: "Juspay", regex: /juspay|juspay\.io|expresscheckout|api\.juspay|checkout\.juspay/i },
+    { name: "Worldline (Ingenico)", regex: /worldline|ingenico|paymentservices\.ingenico|wlpayments|onlinepayment\.worldline/i },
+    { name: "HDFC Payment Gateway", regex: /hdfcbank|paymentgateway\.hdfcbank|hdfcpayment|api\.hdfcbank|hdfc\.co\.in/i },
+    { name: "ICICI Payment Gateway", regex: /icicibank|icicipayments|paymentgateway\.icicibank|icicibank\.com|api\.icicibank/i },
+    { name: "Axis Bank Payment Gateway", regex: /axisbank|paymentgateway\.axisbank|axisbank\.co\.in|api\.axisbank/i },
+    { name: "PayPal", regex: /paypal|www\.paypalobjects\.com|paypal\.com|paypal\.in|api\.paypal/i },
+    { name: "BharatQR", regex: /bharatqr|npci\.org\.in|qr\.bharat|bharatqr\.upi/i },
+    { name: "Flexmoney", regex: /flexmoney|instantemi|checkout\.flexmoney|api\.flexmoney/i },
+    { name: "OneCard", regex: /getonecard|onecard|one\.card|api\.onecard|pay\.onecard/i },
+    { name: "Square", regex: /squareup|square\.com|squarecdn|api\.square|checkout\.square/i },
+    { name: "ZestMoney", regex: /zestmoney|api\.zestmoney|checkout\.zestmoney|paywithzestmoney/i },
+    { name: "Instamojo", regex: /instamojo|checkout\.instamojo|api\.instamojo|pay\.instamojo/i },
+    { name: "Paykun", regex: /paykun|checkout\.paykun|api\.paykun/i },
+    { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=|upi\.me|upi\.org\.in/i },
+    { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay|paymentgateway\.sbi|api\.sbi/i },
+    { name: "Atom", regex: /atomtech|atom\.in|paymentgateway\.atom|api\.atomtech/i },
+    { name: "Direcpay", regex: /direcpay|api\.direcpay|checkout\.direcpay/i },
+    { name: "EBS", regex: /ebs|ebs\.in|ebssecure|paymentgateway\.ebs|api\.ebs/i },
+    { name: "PayGlocal", regex: /payglocal|api\.payglocal|checkout\.payglocal/i },
+    { name: "FSS", regex: /fssnet|fss\.co\.in|fsspayments|api\.fss/i },
+    { name: "Gokwik", regex: /gokwik|gwk\.to|gwk\.in|gokwik\.co|gokwik\.com|analytics\.gokwik|pay\.gokwik|gokwik\.in|gwkcdn|gokwikcdn/i },
+    { name: "Avenues", regex: /avenues|avenues\.in|paymentgateway\.avenues|api\.avenues/i }
+  ];
 
   const matched = [];
   page.on('requestfinished', (request) => {
@@ -295,6 +338,7 @@ async function detectLivePaymentGateway(page) {
       || await page.$('input[type="submit"]');
     if (payBtn) {
       await payBtn.scrollIntoViewIfNeeded();
+      await closeCheckoutOverlays(page); // <-- Insert modal handler here!
       await page.waitForTimeout(1000);
       await payBtn.click({ timeout: 10000 });
       await page.waitForTimeout(6000);
@@ -516,12 +560,14 @@ export async function runCartSimulation(
           try {
             await waitForStable(sel, page, 3, 6000);
             await handleAllPopups(page, log, step);
+            await closeCheckoutOverlays(page); // <-- NEW: Try closing overlays before every major click
             await page.click(sel, { delay: 50 });
             actionSuccess = true;
             break;
           } catch (err) {
             log.push({ action, sel, error: err.message });
             await handleAllPopups(page, log, step);
+            await closeCheckoutOverlays(page); // <-- NEW: Try again
             try {
               await waitForStable(sel, page, 2, 2000);
               await page.click(sel, { delay: 50 });
