@@ -13,11 +13,10 @@ import { fillCheckoutIfVisible } from './checkoutFormFiller.js';
 import axios from 'axios';
 import fs from 'fs';
 
-// --- Proxy Rotation ---
+// ========== 1. Proxy Rotation ================
 const PROXIES = process.env.PROXIES
   ? process.env.PROXIES.split(',').map(x => x.trim()).filter(Boolean)
   : [];
-
 function randomProxy(usedProxies = []) {
   if (!PROXIES.length) return null;
   const unused = PROXIES.filter(p => !usedProxies.includes(p));
@@ -25,9 +24,8 @@ function randomProxy(usedProxies = []) {
   return unused[Math.random() * unused.length | 0];
 }
 
-// --- Webhook for n8n: send on both success and failure ---
+// ========== 2. Webhook Reporting ================
 const WEBHOOK_URL = process.env.HITL_WEBHOOK_URL || 'https://your-n8n-instance/webhook/pg-detector-result';
-
 async function sendWebhook(payload) {
   try {
     await axios.post(WEBHOOK_URL, payload, { timeout: 5000 });
@@ -42,10 +40,10 @@ async function sendWebhook(payload) {
   }
 }
 
-// --- Ensure evidence directory exists ---
+// ========== 3. Ensure Evidence Directory ================
 if (!fs.existsSync(config.evidenceDir)) fs.mkdirSync(config.evidenceDir, { recursive: true });
 
-// --- Robust waiting for selectors with retries ---
+// ========== 4. Helper: Wait for Selector with Retry ================
 async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -57,8 +55,9 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
-// --- Universal Popup Handler ---
+// ========== 5. Exhaustive Universal Popup/Modal Handler ================
 async function autoClosePopups(page) {
+  // Find all overlays/modals (by z-index, role, classes, aria, etc.)
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
       if (!el) return '';
@@ -79,8 +78,9 @@ async function autoClosePopups(page) {
       }
       return path;
     }
+    // Add more modal-related selectors as needed
     return Array.from(document.querySelectorAll(
-      '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie'
+      '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie, .drawer, .sheet, .flyout, .bottom-sheet, .side-modal'
     )).filter(el => {
       const style = window.getComputedStyle(el);
       return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
@@ -103,8 +103,8 @@ async function autoClosePopups(page) {
   }
 }
 
-// --- Payment Gateway Detection (20+ Indian/global PGs) ---
-function detectPaymentGateways({ scripts, iframes }) {
+// ========== 6. Payment Gateway Detection: All Known and Emerging ================
+function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
     { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
     { name: "PayU", regex: /payu|payu\.in|secure\.payu/i },
@@ -141,17 +141,18 @@ function detectPaymentGateways({ scripts, iframes }) {
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
     { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
     { name: "Avenues", regex: /avenues|avenues\.in/i },
-    // Add more as needed!
+    // Add new providers as you see them!
   ];
   const found = [];
-  const allSources = (scripts || []).concat(iframes || []);
+  const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
   for (const { name, regex } of patterns) {
     if (allSources.some(src => regex.test(src))) found.push(name);
+    if (html && regex.test(html)) found.push(name);
   }
-  return found;
+  return Array.from(new Set(found));
 }
 
-// --- OTP Detection ---
+// ========== 7. OTP Detection ================
 async function detectOTP(page) {
   const otpSelectors = [
     'input[autocomplete="one-time-code"]',
@@ -167,7 +168,14 @@ async function detectOTP(page) {
   return null;
 }
 
-// --- Main Exported Function ---
+// ========== 8. Universal Checkout/Buy-Now Selector List ================
+// Called in the element collection phase
+const CHECKOUT_TEXTS = [
+  "checkout", "buy now", "place order", "pay", "go to checkout", "continue to checkout",
+  "proceed", "proceed to pay", "order now", "pay now", "continue to payment", "payment", "review order"
+];
+
+// ========== 9. Main Function ============
 export async function runCartSimulation(url, actionList = ['add to cart', 'checkout'], runContext = {}) {
   let usedProxies = [];
   let proxyRetryCount = 0;
@@ -193,6 +201,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       await page.goto(url, { timeout: config.timeout, waitUntil: 'domcontentloaded' });
       await autoClosePopups(page);
 
+      // ========== CAPTCHA HANDLING ===========
       let captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', ''));
       if (captchaCheck.type) {
         log.push({ step, captcha: captchaCheck });
@@ -219,8 +228,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       }
 
       await saveEvidence({ page, step, evidenceDir, meta: { url, note: 'Initial load' } });
-
-      let addToCartSuccess = false;
 
       for (const action of actionList) {
         step += 1;
@@ -251,7 +258,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           continue;
         }
 
-        // --- LOGIN LOGIC (Gemini LLM-guided) ---
+        // ========== LOGIN/REGISTER/GUEST CHECKOUT LOGIC ===========
         const loginArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -274,7 +281,10 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
           return Array.from(document.querySelectorAll('input[type="email"], input[type="text"], input[type="password"], button, a')).filter(el => {
             const t = (el.innerText || el.value || '').toLowerCase();
-            if (t.includes('login') || t.includes('sign in') || t.includes('continue as guest') || t.includes('guest checkout')) return true;
+            if (
+              t.includes('login') || t.includes('sign in') || t.includes('continue as guest') ||
+              t.includes('guest checkout') || t.includes('sign up') || t.includes('register')
+            ) return true;
             return false;
           }).map(el => ({
             tagName: el.tagName,
@@ -323,8 +333,8 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
         }
 
-        // --- SELECTOR SUGGESTION LOGIC (Gemini/Heuristics, fallback to Vision LLM) ---
-        const elementsArr = await page.evaluate(() => {
+        // ========== ELEMENTS: EXHAUSTIVE BUTTON/CTA SEARCH ===========
+        const elementsArr = await page.evaluate((CHECKOUT_TEXTS) => {
           function cssPath(el) {
             if (!el) return '';
             let path = '';
@@ -344,6 +354,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
             }
             return path;
           }
+          // ALL visible buttons, anchors, input[type=submit] etc.
           return Array.from(document.querySelectorAll('button, a, input[type=submit]')).filter(el => {
             const style = window.getComputedStyle(el);
             return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
@@ -353,20 +364,30 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
             ariaLabel: el.getAttribute('aria-label'),
             id: el.id,
             class: el.className,
-            selector: cssPath(el)
+            selector: cssPath(el),
+            containsCheckoutText: CHECKOUT_TEXTS.some(txt => (el.innerText || '').toLowerCase().includes(txt))
           }));
-        });
+        }, CHECKOUT_TEXTS);
 
+        // ========== 1st: LLM (Gemini) Suggestion ==========
         let selectors = await suggestSelectorsWithGemini(elementsArr, action);
         log.push({ action, selectors, via: 'gemini' });
+
+        // ========== 2nd: Heuristics ==========
         if (!selectors || !selectors.length) {
           selectors = findLikelyButtons(elementsArr);
           log.push({ action, selectors, via: 'heuristics' });
         }
 
+        // ========== 3rd: Fallback: Click All CTAs with Checkout Text ==========
+        if (!selectors.length) {
+          selectors = elementsArr.filter(el => el.containsCheckoutText).map(el => el.selector);
+          log.push({ action, selectors, via: 'checkout-text-fallback' });
+        }
+
+        // ========== 4th: Vision LLM Fallback ==========
         let fallbackVisionTried = false;
         let actionSuccess = false;
-
         for (const sel of selectors) {
           try {
             await waitForStable(sel, page, 3, 6000);
@@ -378,7 +399,7 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
               window.getComputedStyle(el).pointerEvents === 'none'
             );
             if (isDisabled) {
-              // --- Option filling logic when button is disabled ---
+              // Option filling
               const optionsArr = await page.evaluate(() => {
                 function cssPath(el) {
                   if (!el) return '';
@@ -446,7 +467,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }
         }
 
-        // --- LLM Vision Fallback ---
         if (!actionSuccess && !fallbackVisionTried) {
           const screenshotPath = `${evidenceDir}/step_${step}_vision.png`;
           await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -487,12 +507,12 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         await page.waitForTimeout(1500);
       }
 
-      // --- Tier 4: Autofill checkout fields just before payment step ---
+      // ========== Autofill on Checkout Screen ===========
       step += 1;
       await autoClosePopups(page);
       await fillCheckoutIfVisible(page, config.testData);
 
-      // --- OTP Detection (stops, takes screenshot, sends payload, does not proceed further) ---
+      // ========== OTP Detection ===========
       const otpField = await detectOTP(page);
       if (otpField) {
         const otpPath = `${evidenceDir}/step_${step}_otp.png`;
@@ -515,10 +535,20 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         return { success: false, evidenceDir, log, reason: 'OTP detected', step };
       }
 
-      // --- Final PG detection ---
+      // ========== Final PG detection ===========
       const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
       const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
-      const paymentGateways = detectPaymentGateways({ scripts, iframes });
+      // Capture network requests and visible text too
+      const html = await page.content();
+      // Optionally, you can use Playwright’s request interception for deep network sniffing
+
+      const paymentGateways = detectPaymentGateways({
+        scripts,
+        iframes,
+        html,
+        // Add networkRequests, visibleText, OCR outputs, etc. here as available
+      });
+
       await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log, paymentGateways } });
 
       resultPayload = {
