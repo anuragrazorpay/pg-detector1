@@ -28,20 +28,35 @@ ALWAYS respond with this JSON object:
 If there are multiple candidates, pick the one most likely to advance toward checkout/payment.
 `;
 
-  const model = genAI.getGenerativeModel({ model: config.geminiModel });
-  const result = await model.generateContent([
-    { text: prompt },
-    image,
-    { text: "HTML: " + html.slice(0, 12000) } // Trim very large HTMLs
-  ]);
-  let response = await result.response.text();
-  if (response.startsWith("```")) response = response.replace(/```(json)?/g, "").trim();
   try {
-    const obj = JSON.parse(response);
+    const model = genAI.getGenerativeModel({ model: config.geminiModel });
+    const result = await model.generateContent([
+      { text: prompt },
+      image,
+      { text: "HTML: " + html.slice(0, 12000) }
+    ]);
+    let response = await result.response.text();
+    if (response.startsWith("```")) {
+      response = response.replace(/```(json)?/g, "").trim();
+    }
+
+    // Attempt direct JSON parse first
+    let obj = null;
+    try {
+      obj = JSON.parse(response);
+    } catch {
+      // Fallback: extract first JSON object using regex
+      const match = response.match(/{[\s\S]*}/);
+      if (match) {
+        try { obj = JSON.parse(match[0]); } catch {}
+      }
+    }
     if (obj && obj.selector) return obj;
-    throw new Error("Missing selector from Gemini Vision");
+
+    throw new Error("Missing selector or invalid format: " + response);
   } catch (e) {
-    console.error("Vision LLM format issue:", response);
-    return { selector: "", buttonText: "", reasoning: response };
+    console.error("Vision LLM format issue:", e.message);
+    // Always return an object, so downstream code doesn't break
+    return { selector: "", buttonText: "", reasoning: typeof e === "string" ? e : (e.message || "No output") };
   }
 }
