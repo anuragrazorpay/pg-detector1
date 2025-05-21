@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-import { config } from './config.js';
+import { config } from '../config.js';
 import { USER_AGENTS } from './userAgents.js';
 import { findLikelyButtons } from './automation/heuristics.js';
 import { saveEvidence } from './automation/evidence.js';
