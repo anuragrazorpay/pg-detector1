@@ -1,17 +1,17 @@
 import { chromium } from 'playwright';
 import { config } from '../config.js';
 import { USER_AGENTS } from './userAgents.js';
-import { findLikelyButtons } from './automation/heuristics.js';
-import { saveEvidence } from './automation/evidence.js';
-import { suggestSelectorsWithGemini } from './llm/domSelectorGemini.js';
-import { suggestOptionFillWithGemini } from './llm/optionFillingGemini.js';
-import { suggestPopupCloseWithGemini } from './llm/popupHandlerGemini.js';
-import { suggestLoginStrategyWithGemini } from './llm/loginHandlerGemini.js';
-import { detectAndHandleCaptcha } from './automation/captchaHandler.js';
-import { suggestNextActionWithVisionLLM } from './llm/visionNavigator.js'; // <- Make sure this is the correct helper filename!
+import { findLikelyButtons } from './heuristics.js';
+import { saveEvidence } from './evidence.js';
+import { suggestSelectorsWithGemini } from '../llm/domSelectorGemini.js';
+import { suggestOptionFillWithGemini } from '../llm/optionFillingGemini.js';
+import { suggestPopupCloseWithGemini } from '../llm/popupHandlerGemini.js';
+import { suggestLoginStrategyWithGemini } from '../llm/loginHandlerGemini.js';
+import { detectAndHandleCaptcha } from './captchaHandler.js';
+import { suggestNextActionWithVisionLLM } from '../llm/visionNavigator.js';
 import axios from 'axios';
 import fs from 'fs';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 
 // --- Proxy Handling ---
 const PROXIES = process.env.PROXIES
@@ -140,8 +140,7 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
     { name: "PayGlocal", regex: /payglocal/i },
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
     { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
-    { name: "Avenues", regex: /avenues|avenues\.in/i },
-    // Extend as needed
+    { name: "Avenues", regex: /avenues|avenues\.in/i }
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
@@ -236,6 +235,72 @@ async function fillAddressIfVisible(page, log, step) {
       }
     }
   }
+}
+
+// --- LIVE PG DETECTION FUNCTION ---
+async function detectLivePaymentGateway(page) {
+  const patterns = [
+    { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
+    { name: "PayU", regex: /payu|payu\.in|secure\.payu/i },
+    { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe/i },
+    { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue/i },
+    { name: "Cashfree", regex: /cashfree|checkout\.cashfree/i },
+    { name: "Billdesk", regex: /billdesk|pguat\.billdesk|eazy\.billdesk/i },
+    { name: "Paytm", regex: /paytm|securegw\.paytm|merchant\.paytm/i },
+    { name: "PhonePe", regex: /phonepe|pg\.phonepe|payments\.phonepe/i },
+    { name: "Amazon Pay", regex: /amazonpay|pay\.amazon\.in|amazon\.co\.in\/payment/i },
+    { name: "Mobikwik", regex: /mobikwik|wallet\.mobikwik/i },
+    { name: "Pine Labs", regex: /pinelabs|plutus|plutus-cloud/i },
+    { name: "Airtel Payments Bank", regex: /airtelpay|airtelbank/i },
+    { name: "Google Pay (GPay)", regex: /googlepay|gpay|pay\.google\.com/i },
+    { name: "Juspay", regex: /juspay|juspay\.io|expresscheckout/i },
+    { name: "Worldline (Ingenico)", regex: /worldline|ingenico/i },
+    { name: "HDFC Payment Gateway", regex: /hdfcbank|paymentgateway\.hdfcbank/i },
+    { name: "ICICI Payment Gateway", regex: /icicibank|icicipayments/i },
+    { name: "Axis Bank Payment Gateway", regex: /axisbank|paymentgateway\.axisbank/i },
+    { name: "PayPal", regex: /paypal|www\.paypalobjects\.com|paypal\.com/i },
+    { name: "BharatQR", regex: /bharatqr/i },
+    { name: "Flexmoney", regex: /flexmoney|instantemi|checkout\.flexmoney/i },
+    { name: "OneCard", regex: /getonecard|onecard|one\.card/i },
+    { name: "Square", regex: /squareup|square\.com|squarecdn/i },
+    { name: "ZestMoney", regex: /zestmoney/i },
+    { name: "Instamojo", regex: /instamojo|checkout\.instamojo/i },
+    { name: "Paykun", regex: /paykun|checkout\.paykun/i },
+    { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=/i },
+    { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay/i },
+    { name: "Atom", regex: /atomtech|atom\.in/i },
+    { name: "Direcpay", regex: /direcpay/i },
+    { name: "EBS", regex: /ebs|ebs\.in|ebssecure/i },
+    { name: "PayGlocal", regex: /payglocal/i },
+    { name: "FSS", regex: /fssnet|fss\.co\.in/i },
+    { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
+    { name: "Avenues", regex: /avenues|avenues\.in/i }
+  ];
+  const matched = [];
+  page.on('requestfinished', (request) => {
+    const url = request.url();
+    for (const { name, regex } of patterns) {
+      if (regex.test(url)) {
+        matched.push(name);
+      }
+    }
+  });
+
+  // Try clicking pay/checkout button
+  try {
+    const payBtn = await page.$('button:has-text("Pay")')
+      || await page.$('button:has-text("Checkout")')
+      || await page.$('button:has-text("Place Order")')
+      || await page.$('input[type="submit"]');
+    if (payBtn) {
+      await payBtn.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(1000);
+      await payBtn.click({ timeout: 10000 });
+      await page.waitForTimeout(6000);
+    }
+  } catch (e) { }
+
+  return [...new Set(matched)][0] || null;
 }
 
 // --- Main Exported Simulation Function ---
@@ -535,7 +600,10 @@ export async function runCartSimulation(
         visibleText: visibleTextArr
       });
 
-      await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log, paymentGateways } });
+      // --- LIVE PG DETECTION ---
+      const livePaymentGateway = await detectLivePaymentGateway(page);
+
+      await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log, paymentGateways, livePaymentGateway } });
 
       resultPayload = {
         url,
@@ -549,11 +617,12 @@ export async function runCartSimulation(
         iframes,
         networkLogs,
         paymentGateways,
+        livePaymentGateway,
         runContext
       };
       await sendWebhook(resultPayload);
       await browser.close();
-      return { success: true, evidenceDir, scripts, iframes, networkLogs, log, paymentGateways };
+      return { success: true, evidenceDir, scripts, iframes, networkLogs, log, paymentGateways, livePaymentGateway };
     } catch (err) {
       log.push({ error: err.message, step, proxy });
       if (browser) await browser.close();
@@ -589,7 +658,7 @@ export async function runCartSimulation(
 }
 
 // --- CLI usage ---
-if (require.main === module) {
+if (import.meta.url === `file://${process.argv[1]}`) {
   const url = process.argv[2];
   if (!url) {
     console.error("Usage: node index.js <url>");
