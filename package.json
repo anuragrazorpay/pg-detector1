@@ -1,8 +1,8 @@
 {
-  "name": "pg-detector-gemini",
-  "version": "1.0.0",
+  "name": "pg-detector1",
+  "version": "2.0.0",
   "type": "module",
-  "description": "Universal payment gateway detector using Playwright + Gemini",
+  "description": "Production-grade Payment Gateway Detector (Playwright+LLM+Network+Modal Handling)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,9 @@
   "dependencies": {
     "@google/generative-ai": "^0.6.0",
     "playwright": "^1.44.0",
-    "fs-extra": "^11.1.1",
-    "dotenv": "^16.4.5"
+    "fs-extra": "^11.2.0",
+    "dotenv": "^16.4.5",
+    "axios": "^1.6.8",
+    "cheerio": "^1.0.0-rc.12"
   }
 }
