@@ -24,19 +24,32 @@ Here are the elements:
 ${JSON.stringify(loginArr, null, 2)}
 `;
 
-  const model = genAI.getGenerativeModel({ model: config.geminiModel });
-  const result = await model.generateContent(prompt);
-  const response = await result.response.text();
-  let json = response.trim();
-  if (json.startsWith("```")) {
-    json = json.replace(/```(json)?/g, '').trim();
-  }
   try {
-    const obj = JSON.parse(json);
-    if (typeof obj === 'object') return obj;
-    throw new Error('Not an object');
-  } catch {
-    console.error('Gemini login handler returned unexpected format:', response);
+    const model = genAI.getGenerativeModel({ model: config.geminiModel });
+    const result = await model.generateContent(prompt);
+    const response = await result.response.text();
+
+    // Extract first JSON object from anywhere in the text (even if LLM returns extra junk)
+    let json = response.trim();
+    // Remove code blocks
+    if (json.startsWith("```")) json = json.replace(/```(json)?/g, '').trim();
+
+    // Try to extract JSON object from mixed content
+    let obj = null;
+    try {
+      obj = JSON.parse(json);
+    } catch {
+      // Fallback: greedy regex for first {...} block
+      const match = json.match(/{[\s\S]*}/);
+      if (match) {
+        try { obj = JSON.parse(match[0]); } catch {}
+      }
+    }
+    if (obj && typeof obj === 'object') return obj;
+
+    throw new Error('Gemini returned invalid format: ' + response);
+  } catch (err) {
+    console.error('Gemini login handler returned unexpected format:', err.message);
     return null;
   }
 }
