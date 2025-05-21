@@ -22,19 +22,33 @@ Here are the elements:
 ${JSON.stringify(popupsArr, null, 2)}
 `;
 
-  const model = genAI.getGenerativeModel({ model: config.geminiModel });
-  const result = await model.generateContent(prompt);
-  const response = await result.response.text();
-  let json = response.trim();
-  if (json.startsWith("```")) {
-    json = json.replace(/```(json)?/g, '').trim();
-  }
   try {
-    const arr = JSON.parse(json);
+    const model = genAI.getGenerativeModel({ model: config.geminiModel });
+    const result = await model.generateContent(prompt);
+    const response = await result.response.text();
+
+    // Remove code fences if present
+    let json = response.trim();
+    if (json.startsWith("```")) {
+      json = json.replace(/```(json)?/g, '').trim();
+    }
+
+    // Parse the first JSON array, even if surrounded by extra text
+    let arr = null;
+    try {
+      arr = JSON.parse(json);
+    } catch {
+      // Try greedy regex fallback
+      const match = json.match(/\[[\s\S]*\]/);
+      if (match) {
+        try { arr = JSON.parse(match[0]); } catch {}
+      }
+    }
     if (Array.isArray(arr)) return arr;
-    throw new Error('Not an array');
-  } catch {
-    console.error('Gemini popup close returned unexpected format:', response);
+
+    throw new Error('Gemini popup handler returned invalid format: ' + response);
+  } catch (err) {
+    console.error('Gemini popup close returned unexpected format:', err.message);
     return [];
   }
 }
