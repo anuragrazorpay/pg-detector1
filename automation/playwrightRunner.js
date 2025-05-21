@@ -9,12 +9,10 @@ import { suggestPopupCloseWithGemini } from './llm/popupHandlerGemini.js';
 import { suggestLoginStrategyWithGemini } from './llm/loginHandlerGemini.js';
 import { detectAndHandleCaptcha } from './automation/captchaHandler.js';
 import { suggestNextActionWithVisionLLM } from './llm/visionFallbackGemini.js';
-import { fillCheckoutIfVisible } from './automation/checkoutFormFiller.js';
 import axios from 'axios';
 import fs from 'fs';
 import cheerio from 'cheerio';
 
-// --- Proxy Handling ---
 const PROXIES = process.env.PROXIES
   ? process.env.PROXIES.split(',').map(x => x.trim()).filter(Boolean)
   : [];
@@ -25,7 +23,6 @@ function randomProxy(usedProxies = []) {
   return unused[Math.random() * unused.length | 0];
 }
 
-// --- Webhook ---
 const WEBHOOK_URL = process.env.HITL_WEBHOOK_URL || 'https://your-n8n-instance/webhook/pg-detector-result';
 async function sendWebhook(payload) {
   try {
@@ -41,10 +38,8 @@ async function sendWebhook(payload) {
   }
 }
 
-// --- Evidence Dir ---
 if (!fs.existsSync(config.evidenceDir)) fs.mkdirSync(config.evidenceDir, { recursive: true });
 
-// --- Wait Helper ---
 async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -56,8 +51,7 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
-// --- Exhaustive Popup/Drawer/Modal Handler ---
-async function autoClosePopups(page) {
+async function handleAllPopups(page, log, step) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
       if (!el) return '';
@@ -78,7 +72,6 @@ async function autoClosePopups(page) {
       }
       return path;
     }
-    // Covers: dialog, modal, popup, overlay, sheet, drawer, side-panel, bottom-sheet, mini-cart
     return Array.from(document.querySelectorAll(
       '[role="dialog"], .modal, .popup, .overlay, [aria-modal="true"], .dialog, .newsletter, .cookie, .drawer, .sheet, .flyout, .side-panel, .cart-modal, .mini-cart, .cart-drawer'
     )).filter(el => {
@@ -98,11 +91,13 @@ async function autoClosePopups(page) {
     try {
       await waitForStable(popupSel, page, 2, 2000);
       await page.click(popupSel, { delay: 50 });
-    } catch (err) {}
+      log.push({ step, popup: popupSel, closed: true });
+    } catch (err) {
+      log.push({ step, popup: popupSel, error: err.message });
+    }
   }
 }
 
-// --- PG Detection (scripts, iframes, network, visible text) ---
 function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
     { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
@@ -140,7 +135,6 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
     { name: "FSS", regex: /fssnet|fss\.co\.in/i },
     { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
     { name: "Avenues", regex: /avenues|avenues\.in/i },
-    // Extend as needed
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
@@ -151,7 +145,6 @@ function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibl
   return Array.from(new Set(found));
 }
 
-// --- OTP ---
 async function detectOTP(page) {
   const otpSelectors = [
     'input[autocomplete="one-time-code"]',
@@ -167,8 +160,90 @@ async function detectOTP(page) {
   return null;
 }
 
-// --- Main Cart Simulation Export ---
-export async function runCartSimulation(url, actionList = ['add to cart', 'checkout'], runContext = {}) {
+async function fillAddressIfVisible(page, log, step) {
+  const addressFields = await page.evaluate(() => {
+    function cssPath(el) {
+      if (!el) return '';
+      let path = '';
+      while (el.parentElement) {
+        let name = el.tagName.toLowerCase();
+        if (el.id) {
+          name += `#${el.id}`;
+          path = name + (path ? '>' + path : '');
+          break;
+        }
+        const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+        if (sibs.length > 1) {
+          name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+        }
+        path = name + (path ? '>' + path : '');
+        el = el.parentElement;
+      }
+      return path;
+    }
+    return Array.from(document.querySelectorAll('input, textarea, select'))
+      .filter(el => {
+        const ph = (el.placeholder || '').toLowerCase();
+        const nm = (el.name || '').toLowerCase();
+        return (
+          ph.includes('address') ||
+          ph.includes('city') ||
+          ph.includes('pin') ||
+          ph.includes('postal') ||
+          ph.includes('name') ||
+          ph.includes('mobile') ||
+          ph.includes('phone') ||
+          ph.includes('email') ||
+          nm.includes('address') ||
+          nm.includes('city') ||
+          nm.includes('pin') ||
+          nm.includes('postal') ||
+          nm.includes('name') ||
+          nm.includes('mobile') ||
+          nm.includes('phone') ||
+          nm.includes('email')
+        );
+      })
+      .map(el => ({
+        tagName: el.tagName,
+        name: el.getAttribute('name'),
+        id: el.id,
+        class: el.className,
+        placeholder: el.placeholder,
+        type: el.type,
+        selector: cssPath(el)
+      }));
+  });
+  if (addressFields.length > 0) {
+    const addressInstruction = await suggestOptionFillWithGemini(addressFields, 'address');
+    if (addressInstruction && Array.isArray(addressInstruction.fields)) {
+      for (const { selector, value } of addressInstruction.fields) {
+        try {
+          await waitForStable(selector, page, 2, 4000);
+          await page.fill(selector, value);
+        } catch (err) {
+          log.push({ step, autofill: selector, value, error: err.message });
+        }
+      }
+    }
+  }
+}
+
+export async function runCartSimulation(
+  url,
+  actionList = [
+    'add to cart',
+    'go to cart',
+    'proceed',
+    'checkout',
+    'address',
+    'review order',
+    'continue',
+    'pay',
+    'place order'
+  ],
+  runContext = {}
+) {
   let usedProxies = [];
   let proxyRetryCount = 0;
   const maxProxyRetries = 3;
@@ -190,16 +265,12 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
       context = await browser.newContext({ userAgent: ua });
       page = await context.newPage();
 
-      // --- Network Request Interception ---
       let networkLogs = [];
-      page.on('request', req => {
-        networkLogs.push(req.url());
-      });
+      page.on('request', req => { networkLogs.push(req.url()); });
 
       await page.goto(url, { timeout: config.timeout, waitUntil: 'domcontentloaded' });
-      await autoClosePopups(page);
+      await handleAllPopups(page, log, step);
 
-      // --- CAPTCHA HANDLING ---
       let captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', ''));
       if (captchaCheck.type) {
         log.push({ step, captcha: captchaCheck });
@@ -229,7 +300,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
 
       for (const action of actionList) {
         step += 1;
-        await autoClosePopups(page);
+        await handleAllPopups(page, log, step);
+        await fillAddressIfVisible(page, log, step);
+        await handleAllPopups(page, log, step);
 
         captchaCheck = await detectAndHandleCaptcha(page, evidenceDir.replace('./evidence/', '') + `_step${step}`);
         if (captchaCheck.type) {
@@ -256,83 +329,6 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           continue;
         }
 
-        // --- LOGIN/REGISTER/GUEST CHECKOUT LOGIC ---
-        const loginArr = await page.evaluate(() => {
-          function cssPath(el) {
-            if (!el) return '';
-            let path = '';
-            while (el.parentElement) {
-              let name = el.tagName.toLowerCase();
-              if (el.id) {
-                name += `#${el.id}`;
-                path = name + (path ? '>' + path : '');
-                break;
-              }
-              const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
-              if (sibs.length > 1) {
-                name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
-              }
-              path = name + (path ? '>' + path : '');
-              el = el.parentElement;
-            }
-            return path;
-          }
-          return Array.from(document.querySelectorAll('input[type="email"], input[type="text"], input[type="password"], button, a')).filter(el => {
-            const t = (el.innerText || el.value || '').toLowerCase();
-            if (
-              t.includes('login') || t.includes('sign in') || t.includes('continue as guest') ||
-              t.includes('guest checkout') || t.includes('sign up') || t.includes('register')
-            ) return true;
-            return false;
-          }).map(el => ({
-            tagName: el.tagName,
-            type: el.type,
-            innerText: el.innerText,
-            id: el.id,
-            class: el.className,
-            selector: cssPath(el)
-          }));
-        });
-        const loginInstruction = await suggestLoginStrategyWithGemini(loginArr);
-        if (loginInstruction) {
-          try {
-            if (loginInstruction.type === 'guest') {
-              await waitForStable(loginInstruction.selector, page, 3, 4000);
-              await page.click(loginInstruction.selector, { delay: 50 });
-              await autoClosePopups(page);
-            } else if (loginInstruction.type === 'login') {
-              await waitForStable(loginInstruction.usernameSelector, page, 3, 4000);
-              await page.fill(loginInstruction.usernameSelector, loginInstruction.creds.username);
-              await waitForStable(loginInstruction.passwordSelector, page, 3, 4000);
-              await page.fill(loginInstruction.passwordSelector, loginInstruction.creds.password);
-              await waitForStable(loginInstruction.loginBtnSelector, page, 3, 4000);
-              await page.click(loginInstruction.loginBtnSelector, { delay: 50 });
-              await autoClosePopups(page);
-            }
-          } catch (err) {
-            log.push({ action, login: loginInstruction, error: err.message });
-            resultPayload = {
-              url,
-              status: "failure",
-              failureType: "login",
-              step,
-              proxy,
-              userAgent: ua,
-              evidenceDir,
-              reason: loginInstruction,
-              log,
-              paymentGateways: [],
-              runContext
-            };
-            await sendWebhook(resultPayload);
-            await saveEvidence({ page, step, evidenceDir, meta: { action, note: 'Login Failed', loginInstruction } });
-            await browser.close();
-            return { success: false, evidenceDir, log, reason: 'login failed', step };
-          }
-        }
-
-        // --- ELEMENTS: EXHAUSTIVE BUTTON/CTA SEARCH ---
-        // After add to cart, check for modals/drawers for checkout button
         let elementsArr = await page.evaluate(() => {
           function cssPath(el) {
             if (!el) return '';
@@ -366,103 +362,87 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
           }));
         });
 
-        // Also: after "add to cart", check if a modal or drawer appeared and scan for checkout inside it
-        let modalElementsArr = [];
-        if (action.toLowerCase().includes('checkout')) {
-          modalElementsArr = await page.evaluate(() => {
-            function cssPath(el) {
-              if (!el) return '';
-              let path = '';
-              while (el.parentElement) {
-                let name = el.tagName.toLowerCase();
-                if (el.id) {
-                  name += `#${el.id}`;
-                  path = name + (path ? '>' + path : '');
-                  break;
-                }
-                const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
-                if (sibs.length > 1) {
-                  name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
-                }
+        let modalElementsArr = await page.evaluate(() => {
+          function cssPath(el) {
+            if (!el) return '';
+            let path = '';
+            while (el.parentElement) {
+              let name = el.tagName.toLowerCase();
+              if (el.id) {
+                name += `#${el.id}`;
                 path = name + (path ? '>' + path : '');
-                el = el.parentElement;
+                break;
               }
-              return path;
+              const sibs = Array.from(el.parentElement.children).filter(e => e.tagName === el.tagName);
+              if (sibs.length > 1) {
+                name += `:nth-child(${[...el.parentElement.children].indexOf(el) + 1})`;
+              }
+              path = name + (path ? '>' + path : '');
+              el = el.parentElement;
             }
-            const modalSel = '.modal, .drawer, .cart-modal, .mini-cart, .side-panel, [role="dialog"]';
-            return Array.from(document.querySelectorAll(`${modalSel} button, ${modalSel} a, ${modalSel} input[type=submit]`))
-              .filter(el => {
-                const style = window.getComputedStyle(el);
-                return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
-              })
-              .map(el => ({
-                tagName: el.tagName,
-                innerText: el.innerText,
-                ariaLabel: el.getAttribute('aria-label'),
-                id: el.id,
-                class: el.className,
-                selector: cssPath(el),
-              }));
-          });
-        }
+            return path;
+          }
+          const modalSel = '.modal, .drawer, .cart-modal, .mini-cart, .side-panel, [role="dialog"]';
+          return Array.from(document.querySelectorAll(`${modalSel} button, ${modalSel} a, ${modalSel} input[type=submit]`))
+            .filter(el => {
+              const style = window.getComputedStyle(el);
+              return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetHeight > 0 && el.offsetWidth > 0;
+            })
+            .map(el => ({
+              tagName: el.tagName,
+              innerText: el.innerText,
+              ariaLabel: el.getAttribute('aria-label'),
+              id: el.id,
+              class: el.className,
+              selector: cssPath(el),
+            }));
+        });
         elementsArr = elementsArr.concat(modalElementsArr);
 
-        // --- Exhaustive LLM + Heuristic + Fallback ---
         let selectors = [];
-        // 1. LLM
         let llmRes = await suggestSelectorsWithGemini(elementsArr, action);
-        if (Array.isArray(llmRes) && llmRes.length && llmRes.every(sel => typeof sel === 'string' && sel.startsWith('.'))) {
+        if (Array.isArray(llmRes) && llmRes.length) {
           selectors = llmRes;
           log.push({ action, selectors, via: 'gemini' });
         } else {
-          // 2. Heuristics
           selectors = findLikelyButtons(elementsArr, action);
           if (selectors.length) log.push({ action, selectors, via: 'heuristics' });
         }
-        // 3. Fallback: all buttons with checkout/pay/buy text
         if (!selectors.length) {
-          const texts = ["checkout", "buy now", "place order", "pay", "go to checkout", "continue to checkout", "proceed", "proceed to pay", "order now", "pay now", "continue to payment", "payment", "review order"];
+          const texts = [
+            "checkout", "buy now", "place order", "pay", "go to checkout", "continue to checkout", "proceed", "proceed to pay",
+            "order now", "pay now", "continue to payment", "payment", "review order"
+          ];
           selectors = elementsArr.filter(el =>
             texts.some(txt => (el.innerText || '').toLowerCase().includes(txt))
           ).map(el => el.selector);
           if (selectors.length) log.push({ action, selectors, via: 'checkout-text-fallback' });
         }
 
-        // --- Vision LLM fallback (screenshot/HTML) ---
-        let fallbackVisionTried = false;
         let actionSuccess = false;
         for (const sel of selectors) {
           try {
             await waitForStable(sel, page, 3, 6000);
-            await autoClosePopups(page);
+            await handleAllPopups(page, log, step);
             await page.click(sel, { delay: 50 });
             actionSuccess = true;
             break;
           } catch (err) {
             log.push({ action, sel, error: err.message });
-            continue;
-          }
-        }
-        if (!actionSuccess && !fallbackVisionTried) {
-          const screenshotPath = `${evidenceDir}/step_${step}_vision.png`;
-          await page.screenshot({ path: screenshotPath, fullPage: true });
-          const html = await page.content();
-          const visionAction = await suggestNextActionWithVisionLLM(screenshotPath, html, action);
-          if (visionAction && visionAction.selector) {
+            await handleAllPopups(page, log, step);
             try {
-              await waitForStable(visionAction.selector, page, 2, 6000);
-              await page.click(visionAction.selector, { delay: 80 });
+              await waitForStable(sel, page, 2, 2000);
+              await page.click(sel, { delay: 50 });
               actionSuccess = true;
-              log.push({ action, via: 'vision-llm', selector: visionAction.selector });
-            } catch (err) {
-              log.push({ action, via: 'vision-llm', error: err.message });
+              break;
+            } catch (err2) {
+              log.push({ action, sel, secondTry: err2.message });
             }
           }
         }
-
         await saveEvidence({ page, step, evidenceDir, meta: { action, selectors, note: actionSuccess ? 'Success' : 'No selectors worked' } });
         if (!actionSuccess) {
-          log.push({ action, error: 'No selectors worked (even with LLM Vision fallback)' });
+          log.push({ action, error: 'No selectors worked' });
           resultPayload = {
             url,
             status: "failure",
@@ -483,12 +463,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         await page.waitForTimeout(1500);
       }
 
-      // --- Autofill on Checkout Screen ---
-      step += 1;
-      await autoClosePopups(page);
-      await fillCheckoutIfVisible(page, config.testData);
+      await handleAllPopups(page, log, step);
+      await fillAddressIfVisible(page, log, step);
 
-      // --- OTP Detection ---
       const otpField = await detectOTP(page);
       if (otpField) {
         const otpPath = `${evidenceDir}/step_${step}_otp.png`;
@@ -511,11 +488,9 @@ export async function runCartSimulation(url, actionList = ['add to cart', 'check
         return { success: false, evidenceDir, log, reason: 'OTP detected', step };
       }
 
-      // --- Final PG detection (add scripts, iframes, network, visible text) ---
       const scripts = await page.evaluate(() => Array.from(document.scripts).map(s => s.src));
       const iframes = await page.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src));
       const html = await page.content();
-      // Cheerio for visible text if you want to scan for "powered by" clues
       const $ = cheerio.load(html);
       let visibleTextArr = [];
       $('body *').each((i, el) => {
