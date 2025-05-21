@@ -55,7 +55,7 @@ async function waitForStable(selector, page, retries = 3, timeout = 8000) {
   }
 }
 
-// --- New: Aggressive Overlay/Modal/Backdrop Handler ---
+// --- Aggressive Overlay/Modal/Backdrop Handler ---
 async function closeCheckoutOverlays(page) {
   const selectors = [
     '#quickCheckoutBackdrop',
@@ -78,27 +78,53 @@ async function closeCheckoutOverlays(page) {
     '[id*=popup]',
     '[data-dismiss]',
   ];
-
   for (const sel of selectors) {
     const el = await page.$(sel);
     if (el) {
       try {
         await el.click();
         await page.waitForTimeout(500);
-        console.log(`Closed overlay via ${sel}`);
       } catch (err) {
-        // If not clickable, force remove
         await page.evaluate(selector => {
           const e = document.querySelector(selector);
           if (e) e.remove();
         }, sel);
-        console.log(`Force-removed overlay via ${sel}`);
       }
     }
   }
 }
 
-// --- Exhaustive Popup/Drawer/Modal Handler ---
+// --- Smarter Pay/Checkout Button Click ---
+async function clickBestPayButton(page) {
+  const buttonTexts = [
+    "pay", "checkout", "place order", "continue to pay", "complete purchase",
+    "proceed to payment", "confirm payment", "continue to checkout", "buy now",
+    "continue", "order now", "review order", "payment", "continue to payment", "make payment"
+  ];
+  let payBtn = null;
+  for (const txt of buttonTexts) {
+    payBtn = await page.$(`button:has-text("${txt}")`);
+    if (payBtn) break;
+  }
+  if (!payBtn) {
+    payBtn =
+      await page.$('input[type="submit"]') ||
+      await page.$('button[type="submit"]') ||
+      await page.$('a:has-text("pay")') ||
+      await page.$('a:has-text("checkout")');
+  }
+  if (payBtn) {
+    await payBtn.scrollIntoViewIfNeeded();
+    await closeCheckoutOverlays(page);
+    await page.waitForTimeout(1000);
+    await payBtn.click({ timeout: 10000 });
+    await page.waitForTimeout(6000);
+    return true;
+  }
+  return false;
+}
+
+// --- Popup/Drawer/Modal Handler (LLM-based) ---
 async function handleAllPopups(page, log, step) {
   const popupsArr = await page.evaluate(() => {
     function cssPath(el) {
@@ -149,41 +175,41 @@ async function handleAllPopups(page, log, step) {
 // --- PG Detection (scripts, iframes, network, visible text) ---
 function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
-    { name: "Razorpay", regex: /razorpay|checkout\.razorpay/i },
-    { name: "PayU", regex: /payu|payu\.in|secure\.payu/i },
-    { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe/i },
-    { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue/i },
-    { name: "Cashfree", regex: /cashfree|checkout\.cashfree/i },
-    { name: "Billdesk", regex: /billdesk|pguat\.billdesk|eazy\.billdesk/i },
-    { name: "Paytm", regex: /paytm|securegw\.paytm|merchant\.paytm/i },
-    { name: "PhonePe", regex: /phonepe|pg\.phonepe|payments\.phonepe/i },
-    { name: "Amazon Pay", regex: /amazonpay|pay\.amazon\.in|amazon\.co\.in\/payment/i },
-    { name: "Mobikwik", regex: /mobikwik|wallet\.mobikwik/i },
-    { name: "Pine Labs", regex: /pinelabs|plutus|plutus-cloud/i },
-    { name: "Airtel Payments Bank", regex: /airtelpay|airtelbank/i },
-    { name: "Google Pay (GPay)", regex: /googlepay|gpay|pay\.google\.com/i },
-    { name: "Juspay", regex: /juspay|juspay\.io|expresscheckout/i },
-    { name: "Worldline (Ingenico)", regex: /worldline|ingenico/i },
-    { name: "HDFC Payment Gateway", regex: /hdfcbank|paymentgateway\.hdfcbank/i },
-    { name: "ICICI Payment Gateway", regex: /icicibank|icicipayments/i },
-    { name: "Axis Bank Payment Gateway", regex: /axisbank|paymentgateway\.axisbank/i },
-    { name: "PayPal", regex: /paypal|www\.paypalobjects\.com|paypal\.com/i },
-    { name: "BharatQR", regex: /bharatqr/i },
-    { name: "Flexmoney", regex: /flexmoney|instantemi|checkout\.flexmoney/i },
-    { name: "OneCard", regex: /getonecard|onecard|one\.card/i },
-    { name: "Square", regex: /squareup|square\.com|squarecdn/i },
-    { name: "ZestMoney", regex: /zestmoney/i },
-    { name: "Instamojo", regex: /instamojo|checkout\.instamojo/i },
-    { name: "Paykun", regex: /paykun|checkout\.paykun/i },
-    { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=/i },
-    { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay/i },
-    { name: "Atom", regex: /atomtech|atom\.in/i },
-    { name: "Direcpay", regex: /direcpay/i },
-    { name: "EBS", regex: /ebs|ebs\.in|ebssecure/i },
-    { name: "PayGlocal", regex: /payglocal/i },
-    { name: "FSS", regex: /fssnet|fss\.co\.in/i },
-    { name: "Gokwik", regex: /gokwik|gwk\.to|gokwik\.com|analytics\.gokwik/i },
-    { name: "Avenues", regex: /avenues|avenues\.in/i }
+    { name: "Razorpay", regex: /razorpay|checkout\.razorpay|api\.razorpay|dashboard\.razorpay/i },
+    { name: "PayU", regex: /payu|payu\.in|secure\.payu|payu\.money|api\.payu|paymentgateway\.payu/i },
+    { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe|api\.stripe|pay\.stripe|dashboard\.stripe/i },
+    { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue|payment\.ccavenue|checkout\.ccavenue|api\.ccavenue/i },
+    { name: "Cashfree", regex: /cashfree|checkout\.cashfree|api\.cashfree|payments\.cashfree|cfstatic\.cashfree/i },
+    { name: "Billdesk", regex: /billdesk|pguat\.billdesk|eazy\.billdesk|payment\.billdesk|pay\.billdesk/i },
+    { name: "Paytm", regex: /paytm|securegw\.paytm|merchant\.paytm|paytm\.payments|paytm\.bank|api\.paytm/i },
+    { name: "PhonePe", regex: /phonepe|pg\.phonepe|payments\.phonepe|api\.phonepe|phonepeassets|phonepecdn/i },
+    { name: "Amazon Pay", regex: /amazonpay|pay\.amazon\.in|amazon\.co\.in\/payment|payments\.amazon|amazonpay\.in|amazonpay\.com/i },
+    { name: "Mobikwik", regex: /mobikwik|wallet\.mobikwik|api\.mobikwik|payments\.mobikwik|paywithmobikwik/i },
+    { name: "Pine Labs", regex: /pinelabs|plutus|plutus-cloud|pine\.pay|pinepg|plutuscloud|api\.pinelabs/i },
+    { name: "Airtel Payments Bank", regex: /airtelpay|airtelbank|airtel\.in\/bank|paymentsbank\.airtel|api\.airtelbank/i },
+    { name: "Google Pay (GPay)", regex: /googlepay|gpay|pay\.google\.com|pay\.g\.co|payments\.google|tez\.google/i },
+    { name: "Juspay", regex: /juspay|juspay\.io|expresscheckout|api\.juspay|checkout\.juspay/i },
+    { name: "Worldline (Ingenico)", regex: /worldline|ingenico|paymentservices\.ingenico|wlpayments|onlinepayment\.worldline/i },
+    { name: "HDFC Payment Gateway", regex: /hdfcbank|paymentgateway\.hdfcbank|hdfcpayment|api\.hdfcbank|hdfc\.co\.in/i },
+    { name: "ICICI Payment Gateway", regex: /icicibank|icicipayments|paymentgateway\.icicibank|icicibank\.com|api\.icicibank/i },
+    { name: "Axis Bank Payment Gateway", regex: /axisbank|paymentgateway\.axisbank|axisbank\.co\.in|api\.axisbank/i },
+    { name: "PayPal", regex: /paypal|www\.paypalobjects\.com|paypal\.com|paypal\.in|api\.paypal/i },
+    { name: "BharatQR", regex: /bharatqr|npci\.org\.in|qr\.bharat|bharatqr\.upi/i },
+    { name: "Flexmoney", regex: /flexmoney|instantemi|checkout\.flexmoney|api\.flexmoney/i },
+    { name: "OneCard", regex: /getonecard|onecard|one\.card|api\.onecard|pay\.onecard/i },
+    { name: "Square", regex: /squareup|square\.com|squarecdn|api\.square|checkout\.square/i },
+    { name: "ZestMoney", regex: /zestmoney|api\.zestmoney|checkout\.zestmoney|paywithzestmoney/i },
+    { name: "Instamojo", regex: /instamojo|checkout\.instamojo|api\.instamojo|pay\.instamojo/i },
+    { name: "Paykun", regex: /paykun|checkout\.paykun|api\.paykun/i },
+    { name: "UPI", regex: /upi|pay\.upi|upi\.pay|vpa=|upi\.me|upi\.org\.in/i },
+    { name: "SBI ePay", regex: /sbiepay|sbi\.co\.in\/epay|paymentgateway\.sbi|api\.sbi/i },
+    { name: "Atom", regex: /atomtech|atom\.in|paymentgateway\.atom|api\.atomtech/i },
+    { name: "Direcpay", regex: /direcpay|api\.direcpay|checkout\.direcpay/i },
+    { name: "EBS", regex: /ebs|ebs\.in|ebssecure|paymentgateway\.ebs|api\.ebs/i },
+    { name: "PayGlocal", regex: /payglocal|api\.payglocal|checkout\.payglocal/i },
+    { name: "FSS", regex: /fssnet|fss\.co\.in|fsspayments|api\.fss/i },
+    { name: "Gokwik", regex: /gokwik|gwk\.to|gwk\.in|gokwik\.co|gokwik\.com|analytics\.gokwik|pay\.gokwik|gokwik\.in|gwkcdn|gokwikcdn/i },
+    { name: "Avenues", regex: /avenues|avenues\.in|paymentgateway\.avenues|api\.avenues/i }
   ];
   const found = [];
   const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
@@ -330,20 +356,10 @@ async function detectLivePaymentGateway(page) {
     }
   });
 
-  // Try clicking pay/checkout button
+  // --- Updated: Use smarter pay/checkout click logic
   try {
-    const payBtn = await page.$('button:has-text("Pay")')
-      || await page.$('button:has-text("Checkout")')
-      || await page.$('button:has-text("Place Order")')
-      || await page.$('input[type="submit"]');
-    if (payBtn) {
-      await payBtn.scrollIntoViewIfNeeded();
-      await closeCheckoutOverlays(page); // <-- Insert modal handler here!
-      await page.waitForTimeout(1000);
-      await payBtn.click({ timeout: 10000 });
-      await page.waitForTimeout(6000);
-    }
-  } catch (e) { }
+    await clickBestPayButton(page);
+  } catch (e) {}
 
   return [...new Set(matched)][0] || null;
 }
@@ -560,14 +576,14 @@ export async function runCartSimulation(
           try {
             await waitForStable(sel, page, 3, 6000);
             await handleAllPopups(page, log, step);
-            await closeCheckoutOverlays(page); // <-- NEW: Try closing overlays before every major click
+            await closeCheckoutOverlays(page); // <-- Try closing overlays before every major click
             await page.click(sel, { delay: 50 });
             actionSuccess = true;
             break;
           } catch (err) {
             log.push({ action, sel, error: err.message });
             await handleAllPopups(page, log, step);
-            await closeCheckoutOverlays(page); // <-- NEW: Try again
+            await closeCheckoutOverlays(page); // Try again
             try {
               await waitForStable(sel, page, 2, 2000);
               await page.click(sel, { delay: 50 });
