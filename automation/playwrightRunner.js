@@ -688,8 +688,9 @@ export async function runCartSimulation(
       let paymentGateways = [];
       let scripts = [], iframes = [];
       for (const p of context.pages()) {
-        scripts.push(...await p.evaluate(...));
-        iframes.push(...await p.evaluate(...));
+        scripts.push(...await p.evaluate(() => Array.from(document.scripts).map(s => s.src)));
+        iframes.push(...await p.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src)));
+// (networkLogs already handled globally)
         networkLogs.push(...(p._networkLogs || [])); // networkLogs is already declared above
       }
       const html = await page.content();
