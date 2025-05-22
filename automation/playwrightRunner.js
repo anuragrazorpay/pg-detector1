@@ -686,11 +686,11 @@ export async function runCartSimulation(
 
       // --- Evidence, Gateway Detection for ALL open windows/tabs ---
       let paymentGateways = [];
-      let scripts = [], iframes = [], networkLogs = [];
+      let scripts = [], iframes = [];
       for (const p of context.pages()) {
-        scripts.push(...await p.evaluate(() => Array.from(document.scripts).map(s => s.src)));
-        iframes.push(...await p.evaluate(() => Array.from(document.querySelectorAll('iframe')).map(f => f.src)));
-        networkLogs.push(...(p._networkLogs || []));
+        scripts.push(...await p.evaluate(...));
+        iframes.push(...await p.evaluate(...));
+        networkLogs.push(...(p._networkLogs || [])); // networkLogs is already declared above
       }
       const html = await page.content();
       const $ = cheerio.load(html);
