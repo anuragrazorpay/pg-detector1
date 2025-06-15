@@ -52,48 +52,74 @@ function extractSelectorArray(response) {
 export async function suggestSelectorsWithGemini(elementsArr, action, page = null) {
   const safeElements = elementsArr.slice(0, config.maxElements || 30);
   const prompt = `
-You are an expert web automation assistant. Given a list of interactive elements from an e-commerce website, suggest the 3 most likely CSS selectors to perform the action: "${action}". Return a JSON array of CSS selectors. Only choose elements that are visible, clickable, and relevant.
+You are an expert web automation agent analyzing an e-commerce website. Given these interactive elements, identify if this is a platform-powered checkout or a custom checkout flow, then suggest the most relevant selectors for the action: "${action}".
+
+First, check for platform indicators like:
+1. Gokwik: .gokwik-checkout, [data-gokwik], #gokwik-frame
+2. Razorpay Checkout: #razorpay-checkout-frame, [data-razorpay]
+3. PayU Checkout: #payu-checkout-frame, [data-payu]
+4. Cashfree: #cashfree-frame, .cashfree-payment-frame
+5. PhonePe: #phonepe-checkout-frame, [data-phonepe]
+6. CCAvenue: #ccav-frame, #iframe_payment_frame
+
+Return a JSON object with platform detection and selector suggestions:
+{
+  "platformIndicators": {
+    "detected": false,  // or true if platform checkout detected
+    "platform": null,   // platform name if detected (e.g., "Gokwik Checkout")
+    "confidence": 0,    // 0-1 confidence score
+    "evidence": []      // list of elements that suggest platform
+  },
+  "selectors": [       // Relevant element selectors for the action
+    "#buyButton",      // Most specific selectors first
+    ".checkout-btn"    // More general selectors as fallback
+  ],
+  "context": "main" | "modal" | "platform-iframe"  // Where selectors should be used
+}
 
 Here are the elements:
 ${JSON.stringify(safeElements, null, 2)}
-
-Respond with only a JSON array, e.g. ["#buyButton", ".checkout-btn", ...]
 `;
 
   try {
     const model = genAI.getGenerativeModel({ model: config.geminiModel });
     const result = await model.generateContent(prompt);
 
-    // Try both .text() (your code) and deeper candidate path (new Gemini)
+    // Try both .text() (old) and deeper candidate path (new Gemini)
     let response = '';
     try {
       response = await result?.response?.text?.();
     } catch (e) {}
     if (!response) {
-      // fallback to Gemini's candidate structure (may be present)
       response = result?.response?.candidates?.[0]?.content?.parts?.[0]?.text
         || result?.response?.candidates?.[0]?.content?.parts?.[0]
         || '';
     }
-    const selectors = extractSelectorArray(response);
-    if (selectors.length) return selectors;
+    
+    // Extract JSON response
+    let json = response.trim();
+    if (json.startsWith('```')) {
+      json = json.replace(/```(json)?/g, '').trim();
+    }
+    
+    // Parse response or extract first JSON object
+    let obj = null;
+    try {
+      obj = JSON.parse(json);
+    } catch {
+      const match = json.match(/{[\s\S]*}/);
+      if (match) {
+        try { obj = JSON.parse(match[0]); } catch {}
+      }
+    }
+    
+    // Validate and return result
+    if (obj && Array.isArray(obj.selectors)) {
+      return obj;
+    }
+    throw new Error('Invalid format returned by Gemini');
   } catch (err) {
     console.error('Gemini selector suggestion failed:', err.message);
+    return { platformIndicators: { detected: false }, selectors: [] };
   }
-
-  // If no selectors found, try Vision LLM fallback (only if page supplied)
-  if (page) {
-    try {
-      const screenshotPath = `/tmp/vision_fallback_${Date.now()}.png`;
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      const html = await page.content();
-      const visionResp = await suggestNextActionWithVisionLLM(screenshotPath, html, action);
-      if (visionResp && visionResp.selector) {
-        return [visionResp.selector];
-      }
-    } catch (err) {
-      console.error('Vision LLM fallback failed:', err.message);
-    }
-  }
-  return [];
 }

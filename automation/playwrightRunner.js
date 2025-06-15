@@ -212,6 +212,32 @@ async function handlePaymentWindows(context, log, step) {
   }
 }
 
+// --- Checkout Platform Detection ---
+function detectCheckoutPlatform({ scripts, iframes, html, networkRequests, visibleText }) {
+  const platforms = [
+    { name: "Gokwik Checkout", regex: /gokwik|gwk\.to|gwk\.in|gokwik\.co|gokwik\.com|analytics\.gokwik|pay\.gokwik|gokwik\.in|gwkcdn|gokwikcdn/i },
+    { name: "Razorpay Checkout", regex: /checkout\.razorpay\.com/i },
+    { name: "PayU Checkout", regex: /checkout\.payu\.|payumoney\.com\/checkout/i },
+    { name: "Cashfree Checkout", regex: /checkout\.cashfree\.|payments\.cashfree\.com\/checkout/i },
+    { name: "Stripe Checkout", regex: /checkout\.stripe\.com/i },
+    { name: "PhonePe Checkout", regex: /checkout\.phonepe\.|business\.phonepe\.com\/checkout/i },
+    { name: "CCAvenue Checkout", regex: /checkout\.ccavenue\.|secure\.ccavenue\.com/i },
+    { name: "Paytm Checkout", regex: /securegw\.paytm\.in\/checkout|securegw-stage\.paytm\.in\/checkout/i },
+    { name: "Juspay Checkout", regex: /juspay\.in\/checkout|api\.juspay\.in|in\.juspay\.com/i },
+    { name: "Amazon Pay Checkout", regex: /checkout\.amazon\.|payments\.amazon\.in\/checkout/i },
+    { name: "Pine Labs Plutus", regex: /checkout\.pl\.plutus\.com|plutus-cloud|pine\.pay/i }
+  ];
+
+  const allSources = (scripts || []).concat(iframes || []).concat(networkRequests || []).concat(visibleText || []);
+  
+  for (const { name, regex } of platforms) {
+    if (allSources.some(src => regex.test(src))) return name;
+    if (html && regex.test(html)) return name;
+  }
+  
+  return null;
+}
+
 // --- PG Detection (scripts, iframes, network, visible text, ALL PAGES) ---
 function detectPaymentGateways({ scripts, iframes, html, networkRequests, visibleText }) {
   const patterns = [
@@ -378,12 +404,67 @@ async function fillAddressIfVisible(page, log, step) {
   }
 }
 
-// --- LIVE PG DETECTION FUNCTION (ALL WINDOWS) ---
-async function detectLivePaymentGateway(context, log, step) {
-  const patterns = [
-    // ... same patterns as detectPaymentGateways
-    { name: "Razorpay", regex: /razorpay|checkout\.razorpay|api\.razorpay|dashboard\.razorpay/i },
-    { name: "PayU", regex: /payu|payu\.in|secure\.payu|payu\.money|api\.payu|paymentgateway\.payu/i },
+// --- LIVE CHECKOUT DETECTION FUNCTION (ALL WINDOWS) ---
+async function detectLiveCheckoutSystem(context, log, step) {
+  // First check for platform-specific URLs and elements that confirm active checkout
+  const platformPatterns = [
+    { name: "Gokwik Checkout", regex: /gokwik\.co\/checkout|gokwik\.in\/pay|pay\.gokwik\.com/i, 
+      elements: ['.gokwik-checkout', '[data-gokwik]', '#gokwik-frame', '.gwk-checkout-container'] },
+    { name: "Razorpay Checkout", regex: /checkout\.razorpay\.com\/v1\/checkout|api\.razorpay\.com\/v1\/checkout/i,
+      elements: ['#razorpay-checkout-frame', '.razorpay-checkout-frame', '[data-razorpay]', '.razorpay-container'] },
+    { name: "PayU Checkout", regex: /checkout\.payu\.in\/overlay|secure\.payu\.in\/_payment/i,
+      elements: ['#payu-checkout-frame', '#PayUModal', '[data-payu]', '.payu-checkout-container'] },
+    { name: "Cashfree Checkout", regex: /checkout\.cashfree\.com\/checkout|api\.cashfree\.com\/pg/i,
+      elements: ['#cashfree-frame', '.cashfree-payment-frame', '.cashfree-pg-container'] },
+    { name: "PhonePe Checkout", regex: /mercury\.phonepe\.com\/transact\/checkout|api\.phonepe\.com\/apis\/hermes/i,
+      elements: ['#phonepe-checkout-frame', '[data-phonepe]', '.phonepe-pg-container'] },
+    { name: "CCAvenue Checkout", regex: /secure\.ccavenue\.com\/transaction|submit\.ccavenue\.com/i,
+      elements: ['#ccav-frame', '#iframe_payment_frame', '.ccavenue-container'] },
+    { name: "Paytm Checkout", regex: /securegw\.paytm\.in\/theia|securegw\.paytm\.in\/merchantpayment/i,
+      elements: ['#paytm-checkout-frame', '[data-paytm]', '#paytmCard', '.paytm-checkout-container'] },
+    { name: "Juspay Checkout", regex: /api\.juspay\.in\/session|in\.juspay\.com\/end-checkout/i,
+      elements: ['#juspay-iframe', '[data-juspay]', '.juspay-checkout-frame'] },
+    { name: "Pine Labs Plutus", regex: /checkout\.pl\.plutus\.com\/v2\/paymentPage|api\.plutus\.com\/v2\/payment/i,
+      elements: ['#plutus-checkout-frame', '[data-pine]', '.pine-checkout-container'] }
+  ];
+
+  const gatewayPatterns = [
+    { name: "Razorpay", type: 'gateway', regex: /api\.razorpay\.com\/v1\/payments|\.razorpay\.com\/pay/i,
+      elements: ['form[action*="razorpay"]', '#razorpay-form', '[data-razorpay-payment]'] },
+    { name: "PayU", type: 'gateway', regex: /secure\.payu\.in\/_payment|payu\.in\/pay/i,
+      elements: ['#payUForm', 'form[action*="payu"]', '[data-payu-payment]'] },
+    { name: "Cashfree", type: 'gateway', regex: /api\.cashfree\.com\/pg\/orders|\.cashfree\.com\/pay/i,
+      elements: ['#cashfree-form', 'form[action*="cashfree"]', '[data-cashfree-payment]'] },
+    { name: "PhonePe", type: 'gateway', regex: /api\.phonepe\.com\/pay|\.phonepe\.com\/pay/i,
+      elements: ['#phonepe-form', 'form[action*="phonepe"]', '[data-phonepe-payment]'] },
+    { name: "Stripe", type: 'gateway', regex: /api\.stripe\.com\/v1\/payment_intents|\.stripe\.com\/pay/i,
+      elements: ['#stripe-form', 'form[data-stripe]', '[data-stripe="payment-form"]'] }
+  ];
+
+  // For each page in the context
+  for (const page of context.pages()) {
+    try {
+      // Check URL patterns
+      const url = page.url();
+      for (const { name, regex, elements } of platformPatterns) {
+        // If URL matches, verify with element presence
+        if (regex.test(url)) {
+          for (const selector of elements) {
+            const exists = await page.$(selector);
+            if (exists) {
+              log.push({ step, platformDetected: name, via: 'live-detection', url });
+              return { type: 'platform', name };
+            }
+          }
+        }
+      }
+
+      // If no platform detected, check for individual payment gateway patterns
+      const gatewayPatterns = [
+        { name: "Razorpay", regex: /checkout\.razorpay\.com\/v1\/payment|api\.razorpay\.com\/v1\/payments/i,
+          elements: ['#razorpay-payment-form', '[data-razorpay-payment]'] },
+        { name: "PayU", regex: /secure\.payu\.in\/_payment|payu\.in\/processTransaction/i,
+          elements: ['#PayUPaymentForm', '[data-payu-payment]'] },
     { name: "Stripe", regex: /stripe|js\.stripe|checkout\.stripe|api\.stripe|pay\.stripe|dashboard\.stripe/i },
     { name: "CCAvenue", regex: /ccavenue|secure\.ccavenue|payment\.ccavenue|checkout\.ccavenue|api\.ccavenue/i },
     { name: "Cashfree", regex: /cashfree|checkout\.cashfree|api\.cashfree|payments\.cashfree|cfstatic\.cashfree/i },
@@ -419,7 +500,7 @@ async function detectLivePaymentGateway(context, log, step) {
     { name: "Avenues", regex: /avenues|avenues\.in|paymentgateway\.avenues|api\.avenues/i }
     // ... all the rest unchanged
   ];
-  let matched = [];
+  let matched = null;
   // Listen to requests on all pages
   for (const page of context.pages()) {
     page.on('requestfinished', (request) => {
@@ -684,7 +765,7 @@ export async function runCartSimulation(
         return { success: false, evidenceDir, log, reason: 'OTP detected', step };
       }
 
-      // --- Evidence, Gateway Detection for ALL open windows/tabs ---
+      // --- Evidence, Platform/Gateway Detection for ALL open windows/tabs ---
       let paymentGateways = [];
       let scripts = [], iframes = [];
       for (const p of context.pages()) {
@@ -703,19 +784,70 @@ export async function runCartSimulation(
         }
       });
 
-      paymentGateways = detectPaymentGateways({
+      // Initial platform/gateway detection from static content
+      const initialPlatform = detectCheckoutPlatform({
         scripts, iframes, html, networkRequests: networkLogs, visibleText: visibleTextArr
       });
 
-      // --- LIVE PG DETECTION (ALL WINDOWS) ---
-      const livePaymentGateway = await detectLivePaymentGateway(context, log, step);
-
-      await saveEvidence({ page, step, evidenceDir, meta: { scripts, iframes, log, paymentGateways, livePaymentGateway } });
-
-      resultPayload = {
-        url, status: "success", step, proxy, userAgent: ua, evidenceDir,
-        log, scripts, iframes, networkLogs, paymentGateways, livePaymentGateway, runContext
-      };
+      // Attempt to detect live checkout system (platform or gateway)
+      const liveCheckoutSystem = await detectLiveCheckoutSystem(context, log, step);
+      
+      if (liveCheckoutSystem?.type === 'platform') {
+        // We have a confirmed platform checkout
+        await saveEvidence({ page, step, evidenceDir, meta: { 
+          scripts, iframes, log,
+          checkoutPlatform: liveCheckoutSystem.name,
+          initialPlatform,
+          status: 'platform_confirmed'
+        }});
+        
+        resultPayload = {
+          url, status: "success", step, proxy, userAgent: ua, evidenceDir,
+          log, scripts, iframes, networkLogs,
+          checkoutType: "platform",
+          checkoutPlatform: liveCheckoutSystem.name,
+          initialPlatform,
+          runContext
+        };
+      } else if (liveCheckoutSystem?.type === 'gateway') {
+        // We have a confirmed payment gateway (custom checkout)
+        await saveEvidence({ page, step, evidenceDir, meta: { 
+          scripts, iframes, log,
+          paymentGateway: liveCheckoutSystem.name,
+          initialPlatform,
+          status: 'gateway_confirmed'
+        }});
+        
+        resultPayload = {
+          url, status: "success", step, proxy, userAgent: ua, evidenceDir,
+          log, scripts, iframes, networkLogs,
+          checkoutType: "custom",
+          paymentGateway: liveCheckoutSystem.name,
+          initialPlatform,
+          runContext
+        };
+      } else {
+        // No definitive detection, report initial findings
+        const paymentGateways = !initialPlatform ? detectPaymentGateways({
+          scripts, iframes, html, networkRequests: networkLogs, visibleText: visibleTextArr
+        }) : [];
+        
+        await saveEvidence({ page, step, evidenceDir, meta: { 
+          scripts, iframes, log,
+          initialPlatform,
+          paymentGateways,
+          status: 'detection_inconclusive'
+        }});
+        
+        resultPayload = {
+          url, status: "inconclusive", step, proxy, userAgent: ua, evidenceDir,
+          log, scripts, iframes, networkLogs,
+          checkoutType: initialPlatform ? "likely_platform" : "likely_custom",
+          initialPlatform,
+          paymentGateways,
+          runContext
+        };
+      }
       await sendWebhook(resultPayload);
       await browser.close();
       clearTimeout(timer);

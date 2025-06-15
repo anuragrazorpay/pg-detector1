@@ -13,14 +13,32 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 export async function suggestLoginStrategyWithGemini(loginArr) {
   if (!loginArr.length) return null;
   const prompt = `
-You are a web automation agent. The following visible elements suggest a login or signup flow.
-Based on the elements, advise whether to proceed as guest (if a guest/continue button is present) or to fill login credentials (if required).
-Return ONLY as a JSON object like:
-{ "type": "guest", "selector": ".guest-checkout-btn" }
-or
-{ "type": "login", "usernameSelector": "#email", "passwordSelector": "#password", "loginBtnSelector": "#login", "creds": { "username": "test@example.com", "password": "test1234" } }
+You are a web automation agent analyzing a checkout login/signup flow. First check if this is a platform-powered checkout (e.g., Gokwik, Razorpay Checkout) or custom checkout.
+Then advise whether to proceed as guest (if available) or fill login credentials.
 
-Here are the elements:
+IMPORTANT: For platform checkouts, prefer guest/social login options over credential login.
+
+Return ONLY a JSON object like:
+{
+  "platformIndicators": {
+    "detected": false,           // or true if platform checkout detected
+    "platform": null,           // platform name if detected
+    "confidence": 0            // 0-1 confidence score
+  },
+  "loginStrategy": {
+    "type": "guest" | "login" | "social",  // preferred login method
+    "reason": "Guest checkout available",   // why this method was chosen
+    "selectors": {                         // relevant selectors
+      "guestButton": ".guest-checkout",    // if guest flow
+      "usernameField": "#email",          // if login flow
+      "passwordField": "#password",
+      "loginButton": "#login",
+      "socialButton": ".google-login"      // if social login flow
+    }
+  }
+}
+
+Here are the visible form elements:
 ${JSON.stringify(loginArr, null, 2)}
 `;
 
@@ -29,7 +47,7 @@ ${JSON.stringify(loginArr, null, 2)}
     const result = await model.generateContent(prompt);
     const response = await result.response.text();
 
-    // Extract first JSON object from anywhere in the text (even if LLM returns extra junk)
+    // Extract first JSON object from anywhere in the text
     let json = response.trim();
     // Remove code blocks
     if (json.startsWith("```")) json = json.replace(/```(json)?/g, '').trim();
@@ -45,8 +63,11 @@ ${JSON.stringify(loginArr, null, 2)}
         try { obj = JSON.parse(match[0]); } catch {}
       }
     }
-    if (obj && typeof obj === 'object') return obj;
-
+    
+    // Validate response format
+    if (obj && obj.platformIndicators && obj.loginStrategy) {
+      return obj;
+    }
     throw new Error('Gemini returned invalid format: ' + response);
   } catch (err) {
     console.error('Gemini login handler returned unexpected format:', err.message);
